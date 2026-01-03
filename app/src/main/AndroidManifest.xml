@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.qapp.app">
+
+    <!--
+    This app is a personal safety system for drivers.
+    Location access is essential to deliver emergency alerts in real time.
+    -->
+    <!-- Localizacao aproximada para verificacoes rapidas de contexto/seguranca. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Localizacao precisa para monitoramento/rota em tempo real. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!--
+    This app is a personal safety system for drivers.
+    Background location access is essential to allow real-time emergency alerts
+    even when the app is closed or the screen is off.
+    The user is informed and can enable/disable this feature.
+    -->
+    <!-- Localizacao em segundo plano e essencial para emergencias: alertas criticos exigem rastreio continuo mesmo com app fechado. -->
+    <uses-permission
+        android:name="android.permission.ACCESS_BACKGROUND_LOCATION"
+        tools:ignore="BackgroundLocation" />
+    <!-- Captura de audio (ex.: deteccao/alertas por voz). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Permite sobrepor UI (alertas criticos/sobreposicao de aviso de seguranca). -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Vibracao curta para feedback do alerta no overlay. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Permite rodar servicos em primeiro plano (notificacao fixa para tarefas criticas). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Necessario para servico em primeiro plano com microfone no Android 14+. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Mantem CPU ativa para operacao critica enquanto online/panico. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Exige tipo de servico em primeiro plano com localizacao no Android 14+. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- Necessario para comunicacao com backend/telemetria. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Necessario para monitorar o estado da conectividade. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Declara as intents implícitas que o app pode usar (Android 11+) -->
+    <queries>
+        <intent>
+            <action android:name="android.settings.action.MANAGE_OVERLAY_PERMISSION" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.SETTINGS" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.QAPP">
+
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyB8eXi2gnkcXLZ2HHNEa0hnSvW0C2Bpb3k" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.QAPP">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+        This app is a personal safety system for drivers.
+        Foreground service keeps critical safety monitoring active when the app is closed.
+        The user is informed and can control this behavior from the app.
+        -->
+        <!-- Servico em primeiro plano critico: mantem monitoramento e resposta a alertas mesmo com app fechado. -->
+        <service
+            android:name=".services.CoreSecurityService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+        <!--
+        This app is a personal safety system for drivers.
+        Foreground location tracking is essential for emergency alerts and live response.
+        The user is informed and can control this behavior from the app.
+        -->
+        <!-- Servico dedicado a localizacao: necessario para alerta em tempo real e rastreio continuo em emergencias. -->
+        <service
+            android:name=".services.LocationService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+        <!--
+        This app is a personal safety system for drivers.
+        Microphone usage is required for voice-triggered emergency activation.
+        The user is informed and can control this behavior from the app.
+        -->
+        <!-- Servico dedicado a gatilho de voz (servico normal). -->
+        <service
+            android:name=".services.VoiceTriggerService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!--
+        Notification fallback for panic actions when overlay is unavailable.
+        Runs only while the driver is online.
+        -->
+        <service
+            android:name=".services.PanicForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+        <receiver
+            android:name=".services.PanicActionReceiver"
+            android:exported="false" />
+
+        <service
+            android:name=".services.PanicTileService"
+            android:exported="false"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!--
+        This app is a personal safety system for drivers.
+        The overlay is optional and only shown when the user enables it.
+        -->
+        <service
+            android:name=".core.PanicOverlayService"
+            android:exported="false" />
+    </application>
+
+</manifest>

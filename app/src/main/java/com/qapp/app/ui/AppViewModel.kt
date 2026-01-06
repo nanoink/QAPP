@@ -45,6 +45,7 @@ import com.qapp.app.domain.AccessValidator
 import com.qapp.app.domain.Driver
 import com.qapp.app.domain.PanicManager
 import com.qapp.app.services.CoreSecurityService
+import com.qapp.app.services.PanicRealtimeService
 import io.github.jan.supabase.gotrue.auth
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -369,6 +370,7 @@ class AppViewModel(
             if (_isOnline.value) {
                 SecurityStateStore.setState(SecurityState.ONLINE)
                 CoreSecurityService.goOnline(appContext)
+                PanicRealtimeService.startIfAllowed(appContext)
                 startAlertListener()
             } else {
                 SecurityStateStore.setState(SecurityState.OFFLINE)

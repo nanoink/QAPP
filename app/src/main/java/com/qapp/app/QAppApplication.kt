@@ -1,0 +1,13 @@
+package com.qapp.app
+
+import android.app.Application
+import com.qapp.app.core.PanicAlertPendingStore
+import com.qapp.app.services.PanicRealtimeService
+
+class QAppApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        PanicAlertPendingStore.init(this)
+        PanicRealtimeService.startIfAllowed(this)
+    }
+}

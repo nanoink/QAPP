@@ -19,6 +19,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.rememberNavController
 import com.qapp.app.core.PermissionStateManager
+import com.qapp.app.core.PanicAlertPendingStore
 import com.qapp.app.core.SecurityOnboardingStore
 import com.qapp.app.navigation.AppNavGraph
 import com.qapp.app.navigation.AppRoute
@@ -44,6 +45,7 @@ fun QAppApp() {
     val isAuthenticated by appViewModel.isAuthenticated.collectAsStateWithLifecycle()
     val alertState by appViewModel.alertState.collectAsStateWithLifecycle()
     val vehicleGateMessage by appViewModel.vehicleGateMessage.collectAsStateWithLifecycle()
+    val pendingAlert by PanicAlertPendingStore.pending.collectAsStateWithLifecycle()
     val startDestination = when {
         !hasCriticalPermissions -> AppRoute.SecurityOnboarding.route
         !hasSeenOnboarding -> AppRoute.SecurityOnboarding.route
@@ -63,6 +65,7 @@ fun QAppApp() {
     }
 
     LaunchedEffect(Unit) {
+        PanicAlertPendingStore.init(context)
         appViewModel.refreshSession()
     }
 
@@ -104,6 +107,15 @@ fun QAppApp() {
             }
         } else if (currentRoute == AppRoute.IncomingPanicAlert.route) {
             navController.popBackStack()
+        }
+    }
+
+    LaunchedEffect(pendingAlert?.eventId) {
+        val currentRoute = navController.currentBackStackEntry?.destination?.route
+        if (pendingAlert != null && currentRoute != AppRoute.IncomingPanicAlert.route) {
+            navController.navigate(AppRoute.IncomingPanicAlert.route) {
+                launchSingleTop = true
+            }
         }
     }
 

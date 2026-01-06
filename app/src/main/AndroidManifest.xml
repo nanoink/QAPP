@@ -31,6 +31,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- Necessario para servico em primeiro plano com microfone no Android 14+. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Necessario para servico em primeiro plano com data sync no Android 14+. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Mantem CPU ativa para operacao critica enquanto online/panico. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Exige tipo de servico em primeiro plano com localizacao no Android 14+. -->
@@ -54,6 +56,7 @@
     </queries>
 
     <application
+        android:name=".QAppApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -118,6 +121,11 @@
             android:name=".services.PanicForegroundService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <service
+            android:name=".services.PanicRealtimeService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|location" />
 
         <receiver
             android:name=".services.PanicActionReceiver"

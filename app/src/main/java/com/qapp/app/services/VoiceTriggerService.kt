@@ -30,6 +30,7 @@ import com.qapp.app.core.SecurityPanicStateStore
 import com.qapp.app.core.SecuritySessionStore
 import com.qapp.app.core.SecurityStateStore
 import com.qapp.app.core.StoredSessionManager
+import com.qapp.app.core.VoiceHealthMonitor
 import com.qapp.app.domain.PanicManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,8 +55,10 @@ class VoiceTriggerService : Service() {
     private val detections = ArrayDeque<Long>()
     private var shouldListen = false
     private var isListening = false
+    private var recoveryInProgress = false
     private val voiceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var panicVoiceOrchestrator: PanicVoiceOrchestrator
+    private lateinit var voiceHealthMonitor: VoiceHealthMonitor
 
     private val keywordRegex = Regex("\\bsocorro\\b", RegexOption.IGNORE_CASE)
 
@@ -80,6 +83,7 @@ class VoiceTriggerService : Service() {
                 playConfirmationTone()
             }
         )
+        voiceHealthMonitor = VoiceHealthMonitor()
         initSpeechRecognizer()
     }
 
@@ -161,6 +165,17 @@ class VoiceTriggerService : Service() {
                 isListening = false
                 val background = !isAppInForeground()
                 Log.w(logTag, "VOICE_RECOGNIZER_ERROR code=$error background=$background")
+                val recovery = voiceHealthMonitor.onRecognizerError(error)
+                if (recovery.degraded) {
+                    Log.w(logTag, "VOICE_HEALTH_DEGRADED reason=${recovery.degradedReason}")
+                }
+                if (recovery.abortReason != null) {
+                    Log.w(logTag, "VOICE_HEALTH_RECOVERY_ABORTED reason=${recovery.abortReason}")
+                }
+                if (recovery.plan != null) {
+                    scheduleRecognizerRecovery(recovery.plan)
+                    return
+                }
                 if (shouldListen) {
                     mainHandler.postDelayed({ startListening() }, 500)
                 }
@@ -204,6 +219,7 @@ class VoiceTriggerService : Service() {
         }
         val intent = listenIntent ?: return
         isListening = true
+        voiceHealthMonitor.onListeningStarted()
         Log.i(logTag, "VOICE_LISTENING_STARTED")
         recognizer?.startListening(intent)
     }
@@ -212,6 +228,7 @@ class VoiceTriggerService : Service() {
         isListening = false
         recognizer?.stopListening()
         recognizer?.cancel()
+        voiceHealthMonitor.onListeningStopped()
     }
 
     private fun handleMatches(matches: List<String>) {
@@ -242,6 +259,49 @@ class VoiceTriggerService : Service() {
         }
         voiceScope.launch {
             panicVoiceOrchestrator.onKeywordDetected(keyword)
+        }
+    }
+
+    private fun scheduleRecognizerRecovery(plan: VoiceHealthMonitor.RecoveryPlan) {
+        if (recoveryInProgress) return
+        recoveryInProgress = true
+        voiceHealthMonitor.onRecoveryStarted()
+        Log.i(
+            logTag,
+            "VOICE_HEALTH_RECOVERY_STARTED reason=${plan.reason} delayMs=${plan.delayMs}"
+        )
+        mainHandler.postDelayed(
+            {
+                performRecognizerRecovery()
+            },
+            plan.delayMs
+        )
+    }
+
+    private fun performRecognizerRecovery() {
+        if (!shouldListen) {
+            voiceHealthMonitor.onRecoveryAborted()
+            Log.w(logTag, "VOICE_HEALTH_RECOVERY_ABORTED reason=not_listening")
+            recoveryInProgress = false
+            return
+        }
+        val focusHandle = requestTransientAudioFocus()
+        try {
+            stopListening()
+            recognizer?.destroy()
+            recognizer = null
+            initSpeechRecognizer()
+            if (shouldListen) {
+                startListening()
+            }
+            voiceHealthMonitor.onRecoverySucceeded()
+            Log.i(logTag, "VOICE_HEALTH_RECOVERY_SUCCESS")
+        } catch (e: Exception) {
+            voiceHealthMonitor.onRecoveryAborted()
+            Log.w(logTag, "VOICE_HEALTH_RECOVERY_ABORTED reason=exception", e)
+        } finally {
+            abandonTransientAudioFocus(focusHandle)
+            recoveryInProgress = false
         }
     }
 
@@ -301,6 +361,37 @@ class VoiceTriggerService : Service() {
         val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
         tone.startTone(ToneGenerator.TONE_PROP_ACK, 150)
         mainHandler.postDelayed({ tone.release() }, 200)
+    }
+
+    private fun requestTransientAudioFocus(): Any? {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val request = android.media.AudioFocusRequest.Builder(
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+            ).setOnAudioFocusChangeListener { }
+                .build()
+            audioManager.requestAudioFocus(request)
+            request
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(
+                null,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+            )
+            null
+        }
+    }
+
+    private fun abandonTransientAudioFocus(handle: Any?) {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val request = handle as? android.media.AudioFocusRequest ?: return
+            audioManager.abandonAudioFocusRequest(request)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(null)
+        }
     }
 
     private fun hasAudioPermission(): Boolean {

@@ -100,6 +100,7 @@ class PanicRealtimeListener(
     ) {
         val now = System.currentTimeMillis()
         Log.i(logTag, "Realtime panic event received id=${payload.panicEventId}")
+        Log.i(logTag, "PANIC_EVENT_RECEIVED_REALTIME id=${payload.panicEventId}")
         Log.i(
             logTag,
             "PANIC_RECEIVED_EVENT id=${payload.panicEventId} emitter_user=${payload.driverId} lat=${payload.latitude} lng=${payload.longitude}"

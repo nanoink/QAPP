@@ -97,7 +97,7 @@ class PanicEventGuard(
         val sinceIso = formatUtcTimestamp(lastSeenAtMs)
         val result = client.postgrest["panic_events"].select {
             filter {
-                gt("created_at", sinceIso)
+                gt("started_at", sinceIso)
                 eq("is_active", true)
                 neq("driver_id", currentUserId)
             }
@@ -105,10 +105,10 @@ class PanicEventGuard(
         }
         val records = result.decodeList<PanicEventFallback>()
         if (records.isEmpty()) return
-        val sorted = records.sortedBy { parseTimestamp(it.createdAt ?: it.startedAt) ?: 0L }
+        val sorted = records.sortedBy { parseTimestamp(it.startedAt ?: it.createdAt) ?: 0L }
         var maxSeen = lastSeenAtMs
         for (record in sorted) {
-            val createdAtMs = parseTimestamp(record.createdAt ?: record.startedAt)
+            val createdAtMs = parseTimestamp(record.startedAt ?: record.createdAt)
             if (createdAtMs != null && createdAtMs > maxSeen) {
                 maxSeen = createdAtMs
             }

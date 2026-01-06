@@ -42,7 +42,7 @@ class VoiceHealthMonitor(
 
     fun onRecognizerError(errorCode: Int, now: Long = clock()): RecoveryResult {
         pruneErrors(now)
-        if (errorCode == ERROR_NO_MATCH) {
+        if (errorCode in TRACKED_ERRORS) {
             errorTimestamps.addLast(now)
         }
         if (state == VoiceHealthState.RECOVERING) {
@@ -56,7 +56,8 @@ class VoiceHealthMonitor(
         val listeningDurationMs = listeningStartAt?.let { now - it } ?: 0L
         val errorSpike = errorTimestamps.size >= ERROR_THRESHOLD
         val longSession = listeningDurationMs >= CONTINUOUS_LISTEN_MS
-        val shouldDegrade = errorSpike || (longSession && errorCode == ERROR_NO_MATCH)
+        val immediateRecover = errorCode in IMMEDIATE_RECOVERY_ERRORS
+        val shouldDegrade = errorSpike || immediateRecover || (longSession && errorCode == ERROR_NO_MATCH)
         if (!shouldDegrade) {
             return RecoveryResult(
                 degraded = false,
@@ -65,7 +66,11 @@ class VoiceHealthMonitor(
                 abortReason = null
             )
         }
-        val reason = if (errorSpike) "error_spike" else "continuous_listen"
+        val reason = when {
+            immediateRecover -> errorReason(errorCode)
+            errorSpike -> "error_spike"
+            else -> "continuous_listen"
+        }
         val degradedNow = state != VoiceHealthState.DEGRADED
         state = VoiceHealthState.DEGRADED
         if (now < suppressedUntilMs) {
@@ -132,8 +137,23 @@ class VoiceHealthMonitor(
         return min(delay, RECOVERY_MAX_DELAY_MS)
     }
 
+    private fun errorReason(code: Int): String {
+        return when (code) {
+            ERROR_SERVER_DISCONNECTED -> "server_disconnected"
+            ERROR_RECOGNIZER_BUSY -> "recognizer_busy"
+            ERROR_CLIENT -> "client_error"
+            ERROR_TOO_MANY_REQUESTS -> "too_many_requests"
+            else -> "recognizer_error"
+        }
+    }
+
     companion object {
         private const val ERROR_NO_MATCH = 7
+        private const val ERROR_RECOGNIZER_BUSY = 8
+        private const val ERROR_INSUFFICIENT_PERMISSIONS = 9
+        private const val ERROR_TOO_MANY_REQUESTS = 10
+        private const val ERROR_SERVER_DISCONNECTED = 11
+        private const val ERROR_CLIENT = 5
         private const val ERROR_THRESHOLD = 3
         private const val ERROR_WINDOW_MS = 60_000L
         private const val CONTINUOUS_LISTEN_MS = 15 * 60_000L
@@ -141,5 +161,20 @@ class VoiceHealthMonitor(
         private const val RECOVERY_WINDOW_MS = 10 * 60_000L
         private const val RECOVERY_BASE_DELAY_MS = 3_000L
         private const val RECOVERY_MAX_DELAY_MS = 5_000L
+
+        private val TRACKED_ERRORS = setOf(
+            ERROR_NO_MATCH,
+            ERROR_RECOGNIZER_BUSY,
+            ERROR_TOO_MANY_REQUESTS,
+            ERROR_SERVER_DISCONNECTED,
+            ERROR_CLIENT
+        )
+
+        private val IMMEDIATE_RECOVERY_ERRORS = setOf(
+            ERROR_RECOGNIZER_BUSY,
+            ERROR_TOO_MANY_REQUESTS,
+            ERROR_SERVER_DISCONNECTED,
+            ERROR_CLIENT
+        )
     }
 }

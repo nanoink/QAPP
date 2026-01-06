@@ -56,6 +56,7 @@ class VoiceTriggerService : Service() {
     private var shouldListen = false
     private var isListening = false
     private var recoveryInProgress = false
+    private var nextListenAllowedAt: Long = 0L
     private val voiceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var panicVoiceOrchestrator: PanicVoiceOrchestrator
     private lateinit var voiceHealthMonitor: VoiceHealthMonitor
@@ -163,6 +164,7 @@ class VoiceTriggerService : Service() {
             override fun onEndOfSpeech() = Unit
             override fun onError(error: Int) {
                 isListening = false
+                touchHeartbeat()
                 val background = !isAppInForeground()
                 Log.w(logTag, "VOICE_RECOGNIZER_ERROR code=$error background=$background")
                 val recovery = voiceHealthMonitor.onRecognizerError(error)
@@ -171,17 +173,24 @@ class VoiceTriggerService : Service() {
                 }
                 if (recovery.abortReason != null) {
                     Log.w(logTag, "VOICE_HEALTH_RECOVERY_ABORTED reason=${recovery.abortReason}")
+                    nextListenAllowedAt = System.currentTimeMillis() + SUPPRESSED_RETRY_DELAY_MS
                 }
                 if (recovery.plan != null) {
                     scheduleRecognizerRecovery(recovery.plan)
                     return
                 }
                 if (shouldListen) {
-                    mainHandler.postDelayed({ startListening() }, 500)
+                    val delay = if (recovery.abortReason != null) {
+                        ERROR_RETRY_DELAY_MS
+                    } else {
+                        DEFAULT_RETRY_DELAY_MS
+                    }
+                    mainHandler.postDelayed({ startListening() }, delay)
                 }
             }
             override fun onResults(results: Bundle?) {
                 isListening = false
+                touchHeartbeat()
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 handleMatches(matches.orEmpty())
                 if (shouldListen) {
@@ -189,6 +198,7 @@ class VoiceTriggerService : Service() {
                 }
             }
             override fun onPartialResults(partialResults: Bundle?) {
+                touchHeartbeat()
                 val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 handleMatches(matches.orEmpty())
             }
@@ -205,6 +215,10 @@ class VoiceTriggerService : Service() {
 
     private fun startListening() {
         if (isListening || !shouldListen) return
+        if (System.currentTimeMillis() < nextListenAllowedAt) {
+            touchHeartbeat()
+            return
+        }
         if (!hasAudioPermission()) {
             Log.w(logTag, "Microphone permission missing; cannot start listening")
             shouldListen = false
@@ -219,6 +233,7 @@ class VoiceTriggerService : Service() {
         }
         val intent = listenIntent ?: return
         isListening = true
+        touchHeartbeat()
         voiceHealthMonitor.onListeningStarted()
         Log.i(logTag, "VOICE_LISTENING_STARTED")
         recognizer?.startListening(intent)
@@ -415,6 +430,9 @@ class VoiceTriggerService : Service() {
         const val ACTION_STOP = "com.qapp.app.action.VOICE_STOP"
         private const val WINDOW_MS = 5_000L
         private const val REQUIRED_DETECTIONS = 2
+        private const val DEFAULT_RETRY_DELAY_MS = 500L
+        private const val ERROR_RETRY_DELAY_MS = 2_500L
+        private const val SUPPRESSED_RETRY_DELAY_MS = 8_000L
 
         private val lastHeartbeatAt = AtomicLong(0L)
 

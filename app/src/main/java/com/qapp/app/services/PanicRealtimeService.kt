@@ -21,13 +21,16 @@ import com.qapp.app.core.IncomingPanicAlertStore
 import com.qapp.app.core.LocationStateStore
 import com.qapp.app.core.PanicEventGuard
 import com.qapp.app.core.PanicAlertPendingStore
+import com.qapp.app.core.PanicAlertPayload
 import com.qapp.app.core.PanicMath
 import com.qapp.app.core.PanicStateManager
+import com.qapp.app.core.PanicResolvedPayload
 import com.qapp.app.core.SecurityStateStore
 import com.qapp.app.core.SupabaseClientProvider
 import com.qapp.app.data.repository.VehicleInfo
 import io.github.jan.supabase.gotrue.auth
 import io.github.jan.supabase.realtime.PostgresAction
+import io.github.jan.supabase.realtime.broadcastFlow
 import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
 import io.github.jan.supabase.realtime.realtime
@@ -38,6 +41,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -55,9 +59,13 @@ class PanicRealtimeService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var alertsJob: Job? = null
     private var channel: io.github.jan.supabase.realtime.RealtimeChannel? = null
+    private var broadcastChannel: io.github.jan.supabase.realtime.RealtimeChannel? = null
+    private var broadcastJob: Job? = null
+    private var resolvedJob: Job? = null
     private var guard: PanicEventGuard? = null
     private val realtimeHealthy = AtomicBoolean(false)
     private var wakeLock: PowerManager.WakeLock? = null
+    private val processedEvents = LinkedHashMap<String, Long>()
 
     override fun onCreate() {
         super.onCreate()
@@ -84,8 +92,11 @@ class PanicRealtimeService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         alertsJob?.cancel()
+        broadcastJob?.cancel()
+        resolvedJob?.cancel()
         runBlocking {
             channel?.unsubscribe()
+            broadcastChannel?.unsubscribe()
         }
         realtimeHealthy.set(false)
         guard?.stop()
@@ -129,6 +140,30 @@ class PanicRealtimeService : Service() {
                 Log.w(logTag, "Realtime listener error: ${e.message}", e)
             }
         }
+        startBroadcastListener()
+    }
+
+    private fun startBroadcastListener() {
+        if (broadcastJob?.isActive == true) return
+        val channel = SupabaseClientProvider.client.realtime.channel("panic_events")
+        broadcastChannel = channel
+        broadcastJob = scope.launch {
+            try {
+                channel.subscribe()
+                launch {
+                    channel.broadcastFlow<PanicAlertPayload>(EVENT_PANIC).collect { payload ->
+                        handleBroadcast(payload)
+                    }
+                }
+                launch {
+                    channel.broadcastFlow<PanicResolvedPayload>(EVENT_PANIC_RESOLVED).collect { payload ->
+                        handleResolvedBroadcast(payload)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(logTag, "Broadcast listener error: ${e.message}", e)
+            }
+        }
     }
 
     private suspend fun handleInsert(record: JsonObject) {
@@ -137,13 +172,17 @@ class PanicRealtimeService : Service() {
         val eventId = record.string("id") ?: return
         Log.i(logTag, "PANIC_EVENT_RECEIVED_REALTIME id=$eventId")
         val driverId = record.string("driver_id") ?: return
+        if (!shouldProcessEvent(eventId)) {
+            Log.i(logTag, "PANIC_EVENT_DEDUPLICATED id=$eventId")
+            return
+        }
         if (!SecurityStateStore.isOnline()) {
-            Log.i(logTag, "Alert ignored (offline) id=$eventId")
+            logDecision(eventId, driverId, null, false, "SKIPPED", "OFFLINE")
             return
         }
         val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
         if (!currentUserId.isNullOrBlank() && currentUserId == driverId) {
-            Log.i(logTag, "Alert ignored (self) id=$eventId")
+            logDecision(eventId, driverId, null, true, "SKIPPED", "SELF")
             return
         }
         val location = record.latLng() ?: return
@@ -155,9 +194,11 @@ class PanicRealtimeService : Service() {
             location.second
         )
         if (distanceKm > ALERT_RADIUS_KM) {
-            Log.i(logTag, "Alert ignored (distance) id=$eventId")
+            logDecision(eventId, driverId, distanceKm, true, "SKIPPED", "OUT_OF_RADIUS")
             return
         }
+        logDecision(eventId, driverId, distanceKm, true, "DELIVERED", null)
+        markProcessed(eventId)
         val now = System.currentTimeMillis()
         val vehicle = VehicleInfo(
             make = record.string("vehicle_brand") ?: record.string("vehicle_make"),
@@ -188,6 +229,70 @@ class PanicRealtimeService : Service() {
         handleInsert(record)
     }
 
+    private suspend fun handleBroadcast(payload: PanicAlertPayload) {
+        val eventId = payload.panicEventId
+        val driverId = payload.driverId
+        if (!shouldProcessEvent(eventId)) {
+            Log.i(logTag, "PANIC_EVENT_DEDUPLICATED id=$eventId")
+            return
+        }
+        val online = SecurityStateStore.isOnline()
+        if (!online) {
+            logDecision(eventId, driverId, null, false, "SKIPPED", "OFFLINE")
+            return
+        }
+        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
+        if (!currentUserId.isNullOrBlank() && currentUserId == driverId) {
+            logDecision(eventId, driverId, null, true, "SKIPPED", "SELF")
+            return
+        }
+        val ownLocation = LocationStateStore.get()
+        if (ownLocation == null) {
+            logDecision(eventId, driverId, null, online, "SKIPPED", "NO_LOCATION")
+            return
+        }
+        val distanceKm = PanicMath.distanceKm(
+            ownLocation.lat,
+            ownLocation.lng,
+            payload.latitude,
+            payload.longitude
+        )
+        if (distanceKm > ALERT_RADIUS_KM) {
+            logDecision(eventId, driverId, distanceKm, online, "SKIPPED", "OUT_OF_RADIUS")
+            return
+        }
+        logDecision(eventId, driverId, distanceKm, online, "DELIVERED", null)
+        markProcessed(eventId)
+        val now = System.currentTimeMillis()
+        val vehicle = VehicleInfo(
+            make = payload.vehicleBrand ?: payload.vehicleMake,
+            model = payload.vehicleModel,
+            plate = payload.vehiclePlate,
+            color = payload.vehicleColor
+        )
+        IncomingPanicAlertStore.showAlert(
+            eventId = eventId,
+            driverId = driverId,
+            driverName = payload.driverName,
+            lat = payload.latitude,
+            lng = payload.longitude,
+            distanceKm = distanceKm,
+            startedAtMs = now,
+            muted = false,
+            vehicle = vehicle
+        )
+        PanicAlertPendingStore.save(eventId, driverId, now)
+        acquireWakeLock()
+        showAlertNotification(eventId, driverId)
+    }
+
+    private suspend fun handleResolvedBroadcast(payload: PanicResolvedPayload) {
+        val eventId = payload.panicEventId
+        PanicAlertPendingStore.clearIfMatches(eventId)
+        IncomingPanicAlertStore.markEnded()
+        releaseWakeLock()
+    }
+
     private suspend fun handleUpdate(record: JsonObject) {
         val eventId = record.string("id") ?: return
         val isActive = record.boolean("is_active")
@@ -199,8 +304,61 @@ class PanicRealtimeService : Service() {
         }
     }
 
+    private fun shouldProcessEvent(eventId: String): Boolean {
+        pruneProcessed()
+        if (processedEvents.containsKey(eventId)) return false
+        val currentAlert = IncomingPanicAlertStore.state.value.eventId
+        if (!currentAlert.isNullOrBlank() && currentAlert == eventId) return false
+        val pending = PanicAlertPendingStore.current()?.eventId
+        if (!pending.isNullOrBlank() && pending == eventId) return false
+        return true
+    }
+
+    private fun markProcessed(eventId: String) {
+        processedEvents[eventId] = System.currentTimeMillis()
+    }
+
+    private fun pruneProcessed() {
+        val now = System.currentTimeMillis()
+        val iterator = processedEvents.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (now - entry.value > PROCESSED_TTL_MS) {
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun logDecision(
+        eventId: String,
+        driverId: String,
+        distanceKm: Double?,
+        online: Boolean,
+        decision: String,
+        reason: String?
+    ) {
+        val distance = distanceKm?.let { String.format(Locale.US, "%.2f", it) } ?: "null"
+        val reasonText = reason ?: "none"
+        Log.i(
+            logTag,
+            "PANIC_EVENT_RECEIVED event_id=$eventId EMITTER_ID=$driverId " +
+                "DISTANCE_TO_EMITTER=$distance IS_ONLINE=$online " +
+                "DELIVERY_DECISION=$decision reason=$reasonText"
+        )
+    }
+
     private fun showAlertNotification(eventId: String, driverId: String) {
         createAlertChannel()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                Log.w(logTag, "Notification skipped: POST_NOTIFICATIONS not granted")
+                return
+            }
+        }
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(EXTRA_ALERT_EVENT_ID, eventId)
@@ -382,6 +540,9 @@ class PanicRealtimeService : Service() {
         private const val ALERT_CHANNEL_ID = "panic_realtime_alerts"
         private const val SERVICE_NOTIFICATION_ID = 3301
         private const val ALERT_RADIUS_KM = 10.0
+        private const val EVENT_PANIC = "panic"
+        private const val EVENT_PANIC_RESOLVED = "panic_resolved"
+        private const val PROCESSED_TTL_MS = 10 * 60 * 1000L
         const val EXTRA_ALERT_EVENT_ID = "extra_alert_event_id"
         const val EXTRA_ALERT_DRIVER_ID = "extra_alert_driver_id"
 

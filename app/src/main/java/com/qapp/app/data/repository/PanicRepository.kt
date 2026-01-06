@@ -47,34 +47,35 @@ class PanicRepository : PanicDataSource {
         if (userId.isNullOrBlank()) {
             return Result.failure(IllegalStateException("Missing user id"))
         }
-        val payload = PanicEventInsert(
+        Log.i(logTag, "PANIC_INSERT_ATTEMPT")
+        val startedAt = formatUtcTimestamp(System.currentTimeMillis())
+        val locationPoint = formatPoint(location.longitude, location.latitude)
+        val activeVehicleId = vehicle.id.takeIf { it.isNotBlank() }
+            ?: getActiveVehicleForDriver(userId)?.id
+        val basePayload = PanicEventInsertBase(
             driverId = userId,
             isActive = true,
-            startedAt = formatUtcTimestamp(System.currentTimeMillis()),
-            location = formatPoint(location.longitude, location.latitude),
-            vehicleId = vehicle.id,
-            vehicleMake = vehicle.make,
-            vehicleModel = vehicle.model,
-            vehicleColor = vehicle.color,
-            vehiclePlate = vehicle.plate
+            startedAt = startedAt,
+            location = locationPoint
         )
-        return try {
-            val result = client.postgrest["panic_events"].insert(payload) {
-                select()
-            }
-            val id = result.decodeList<ActivePanicEvent>().firstOrNull()?.id
-            if (id.isNullOrBlank()) {
-                Result.failure(IllegalStateException("Missing panic event id"))
-            } else {
-                Result.success(UUID.fromString(id))
-            }
-        } catch (e: Exception) {
-            if (e is SerializationException) {
-                DefensiveModeManager.recordSerializationError()
-            }
-            Log.e(logTag, "PANIC_INSERT_ERROR: ${e.message}", e)
-            Result.failure(e)
+        val result = if (!activeVehicleId.isNullOrBlank()) {
+            val vehiclePayload = PanicEventInsertWithVehicleId(
+                driverId = userId,
+                isActive = true,
+                startedAt = startedAt,
+                location = locationPoint,
+                vehicleId = activeVehicleId
+            )
+            insertWithSchemaGuard(vehiclePayload, basePayload)
+        } else {
+            insertBase(basePayload)
         }
+        result.onSuccess { id ->
+            Log.i(logTag, "PANIC_INSERT_SUCCESS event_id=$id")
+        }.onFailure { error ->
+            Log.e(logTag, "PANIC_INSERT_FAILED reason=${error.message}", error)
+        }
+        return result
     }
 
     override suspend fun resolvePanicEvent(eventId: UUID): Result<Int> {
@@ -124,10 +125,109 @@ class PanicRepository : PanicDataSource {
     private fun formatPoint(lng: Double, lat: Double): String {
         return "POINT($lng $lat)"
     }
+
+    suspend fun getActiveVehicleForDriver(driverId: String): VehicleRecord? {
+        return try {
+            val result = client.postgrest["vehicles"].select {
+                filter {
+                    eq("driver_id", driverId)
+                    eq("is_active", true)
+                }
+                limit(1)
+            }
+            val vehicle = result.decodeList<VehicleRecord>().firstOrNull()
+            if (vehicle == null) {
+                Log.w(logTag, "NO_ACTIVE_VEHICLE_FOUND")
+            }
+            vehicle
+        } catch (e: Exception) {
+            recordSerializationFailure(e)
+            Log.e(logTag, "Failed to load active vehicle for panic", e)
+            null
+        }
+    }
+
+    private suspend fun insertWithSchemaGuard(
+        payload: PanicEventInsertWithVehicleId,
+        fallback: PanicEventInsertBase
+    ): Result<UUID> {
+        val first = insertPayload(payload)
+        if (first.isSuccess) return first
+        val error = first.exceptionOrNull()
+        return if (error != null && isSchemaError(error)) {
+            Log.w(logTag, "PANIC_INSERT_SCHEMA_GUARD_TRIGGERED")
+            insertPayload(fallback)
+        } else {
+            first
+        }
+    }
+
+    private suspend fun insertBase(payload: PanicEventInsertBase): Result<UUID> {
+        return insertPayload(payload)
+    }
+
+    private suspend fun insertPayload(payload: PanicEventInsertBase): Result<UUID> {
+        return try {
+            val result = client.postgrest["panic_events"].insert(payload) {
+                select()
+            }
+            val id = result.decodeList<ActivePanicEvent>().firstOrNull()?.id
+            if (id.isNullOrBlank()) {
+                Result.failure(IllegalStateException("Missing panic event id"))
+            } else {
+                Result.success(UUID.fromString(id))
+            }
+        } catch (e: Exception) {
+            recordSerializationFailure(e)
+            Log.e(logTag, "PANIC_INSERT_ERROR: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun insertPayload(payload: PanicEventInsertWithVehicleId): Result<UUID> {
+        return try {
+            val result = client.postgrest["panic_events"].insert(payload) {
+                select()
+            }
+            val id = result.decodeList<ActivePanicEvent>().firstOrNull()?.id
+            if (id.isNullOrBlank()) {
+                Result.failure(IllegalStateException("Missing panic event id"))
+            } else {
+                Result.success(UUID.fromString(id))
+            }
+        } catch (e: Exception) {
+            recordSerializationFailure(e)
+            Log.e(logTag, "PANIC_INSERT_ERROR: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    private fun isSchemaError(error: Throwable): Boolean {
+        val message = error.message ?: return false
+        return message.contains("column", ignoreCase = true) &&
+            message.contains("does not exist", ignoreCase = true)
+    }
+
+    private fun recordSerializationFailure(exception: Exception) {
+        if (exception is SerializationException) {
+            DefensiveModeManager.recordSerializationError()
+        }
+    }
 }
 
 @Serializable
-data class PanicEventInsert(
+data class PanicEventInsertBase(
+    @SerialName("driver_id")
+    val driverId: String,
+    @SerialName("is_active")
+    val isActive: Boolean,
+    @SerialName("started_at")
+    val startedAt: String,
+    val location: String
+)
+
+@Serializable
+data class PanicEventInsertWithVehicleId(
     @SerialName("driver_id")
     val driverId: String,
     @SerialName("is_active")
@@ -136,15 +236,7 @@ data class PanicEventInsert(
     val startedAt: String,
     val location: String,
     @SerialName("vehicle_id")
-    val vehicleId: String,
-    @SerialName("vehicle_make")
-    val vehicleMake: String,
-    @SerialName("vehicle_model")
-    val vehicleModel: String,
-    @SerialName("vehicle_color")
-    val vehicleColor: String,
-    @SerialName("vehicle_plate")
-    val vehiclePlate: String
+    val vehicleId: String
 )
 
 @Serializable

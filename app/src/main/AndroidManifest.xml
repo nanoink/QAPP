@@ -41,6 +41,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Necessario para monitorar o estado da conectividade. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Necessario para notificacoes em Android 13+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Declara as intents implícitas que o app pode usar (Android 11+) -->
     <queries>

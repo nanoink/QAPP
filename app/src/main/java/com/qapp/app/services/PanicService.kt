@@ -12,14 +12,7 @@ import com.qapp.app.data.repository.VehicleRepository
 import com.qapp.app.domain.PanicCreateResult
 import com.qapp.app.domain.PanicManager
 import com.qapp.app.domain.PanicResolveOutcome
-import com.qapp.app.domain.PanicUserMissingException
 import io.github.jan.supabase.gotrue.auth
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -30,37 +23,30 @@ class PanicService(
     private val realtimeManager: RealtimeManager = RealtimeManager,
     private val vehicleRepository: VehicleRepository = VehicleRepository()
 ) {
-
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var retryJob: Job? = null
-    private var pendingVehicle: VehicleRecord? = null
-
-    suspend fun triggerPanic(source: String, lat: Double?, lng: Double?): Boolean {
+    suspend fun triggerPanic(source: String, lat: Double?, lng: Double?): PanicCreateResult? {
         val location = resolveLocation(lat, lng)
+        if (location == null) {
+            Log.w("QAPP_PANIC", "PANIC_INSERT_ERROR: Missing location")
+            return null
+        }
         val vehicle = resolveActiveVehicle()
         if (vehicle == null) {
             Log.w("QAPP_PANIC", "PANIC_BLOCKED_NO_ACTIVE_VEHICLE")
-            return false
+            return null
         }
         val result = panicManager.createEventIfNeeded(source, location, vehicle)
         if (result.isFailure) {
             val error = result.exceptionOrNull()
-            if (error is PanicUserMissingException) {
-                Log.w("QAPP_PANIC", "PANIC_EVENT_DELAYED_USER_NOT_READY")
-            } else {
-                Log.e("QAPP_PANIC", "PANIC_INSERT_ERROR: ${error?.message}", error)
-            }
-            scheduleRetry(source, vehicle)
-            return true
+            Log.e("QAPP_PANIC", "PANIC_INSERT_ERROR: ${error?.message}", error)
+            return null
         }
         val outcome = result.getOrNull()
         if (outcome != null) {
             if (outcome.created) {
                 sendRealtimeAlert(outcome, location, vehicle)
             }
-            cancelRetry()
         }
-        return true
+        return outcome
     }
 
     suspend fun resolvePanic(): PanicResolveOutcome {
@@ -75,7 +61,6 @@ class PanicService(
             return outcome
         }
         Log.i("QAPP_PANIC", "Panic ended id=$panicId")
-        cancelRetry()
         val userId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
         if (panicId.isNullOrBlank() || userId.isNullOrBlank()) {
             return outcome
@@ -103,47 +88,6 @@ class PanicService(
             longitude = last.lng
             time = last.timestamp
         }
-    }
-
-    private fun scheduleRetry(source: String, vehicle: VehicleRecord) {
-        if (retryJob?.isActive == true) return
-        Log.w("QAPP_PANIC", "PANIC_INSERT_RETRY_SCHEDULED")
-        pendingVehicle = vehicle
-        retryJob = scope.launch {
-            while (panicManager.isPanicActive() && panicManager.isPending()) {
-                delay(RETRY_INTERVAL_MS)
-                val location = resolveLocation(null, null)
-                if (location == null) {
-                    continue
-                }
-                val activeVehicle = pendingVehicle ?: resolveActiveVehicle()
-                if (activeVehicle == null) {
-                    Log.w("QAPP_PANIC", "PANIC_BLOCKED_NO_ACTIVE_VEHICLE")
-                    cancelRetry()
-                    break
-                }
-                val result = panicManager.createEventIfNeeded(source, location, activeVehicle)
-                if (result.isFailure) {
-                    val error = result.exceptionOrNull()
-                    Log.e("QAPP_PANIC", "PANIC_INSERT_ERROR: ${error?.message}", error)
-                    continue
-                }
-                val outcome = result.getOrNull()
-                if (outcome != null) {
-                    if (outcome.created) {
-                        sendRealtimeAlert(outcome, location, activeVehicle)
-                    }
-                    cancelRetry()
-                    break
-                }
-            }
-        }
-    }
-
-    private fun cancelRetry() {
-        retryJob?.cancel()
-        retryJob = null
-        pendingVehicle = null
     }
 
     private suspend fun sendRealtimeAlert(
@@ -202,9 +146,5 @@ class PanicService(
         val formatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
         formatter.timeZone = TimeZone.getTimeZone("UTC")
         return formatter.format(Date(epochMillis))
-    }
-
-    companion object {
-        private const val RETRY_INTERVAL_MS = 10_000L
     }
 }

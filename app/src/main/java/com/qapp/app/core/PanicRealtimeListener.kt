@@ -13,6 +13,7 @@ import com.qapp.app.data.repository.DriverLocation
 import com.qapp.app.data.repository.PanicEventRecord
 import com.qapp.app.data.repository.DriverProfile
 import com.qapp.app.data.repository.VehicleInfo
+import com.qapp.app.data.repository.DriverRepository
 import com.qapp.app.ui.AlertSystemStatus
 import com.qapp.app.MainActivity
 import com.qapp.app.core.CoreConfig
@@ -40,6 +41,7 @@ class PanicRealtimeListener(
     private var lastKnownLocation: CachedLocation? = null
     private var systemStatusCallback: ((AlertSystemStatus) -> Unit)? = null
     private val antiSpamManager = PanicAntiSpamManager()
+    private val driverRepository = DriverRepository()
 
     fun start(
         onAlertStarted: (PanicEventRecord, DriverProfile?, VehicleInfo?, Boolean) -> Unit,
@@ -110,13 +112,22 @@ class PanicRealtimeListener(
         }
         pruneProcessed(now)
         if (!SecurityStateStore.isOnline()) {
+            logDeliveryDecision(payload, null, "SKIPPED", "OFFLINE")
             logIgnored("offline", payload)
             processedEvents[payload.panicEventId] = now
             return
         }
         val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
         if (!currentUserId.isNullOrBlank() && currentUserId == payload.driverId) {
+            logDeliveryDecision(payload, null, "SKIPPED", "SELF")
             logIgnored("self", payload)
+            processedEvents[payload.panicEventId] = now
+            return
+        }
+        val emitterOnline = isEmitterOnline(payload.driverId)
+        if (emitterOnline == false) {
+            logDeliveryDecision(payload, null, "SKIPPED", "OFFLINE")
+            logIgnored("offline", payload)
             processedEvents[payload.panicEventId] = now
             return
         }
@@ -134,8 +145,9 @@ class PanicRealtimeListener(
             logIgnored("duplicate", payload)
             return
         }
-        val cachedLocation = refreshLastKnownLocation()
+        val cachedLocation = resolveReceiverLocation()
         if (cachedLocation == null) {
+            logDeliveryDecision(payload, null, "SKIPPED", "NO_LOCATION")
             logIgnored("no_location", payload)
             processedEvents[payload.panicEventId] = now
             return
@@ -150,6 +162,7 @@ class PanicRealtimeListener(
         }
         Log.i(logTag, "Distance calculated: ${formatKm(distanceKm)} km")
         if (distanceKm > radiusKm) {
+            logDeliveryDecision(payload, distanceKm, "SKIPPED", "OUT_OF_RADIUS")
             logIgnored("distance", payload)
             processedEvents[payload.panicEventId] = now
             return
@@ -221,6 +234,7 @@ class PanicRealtimeListener(
         }
         processedEvents[payload.panicEventId] = now
         activeAlertId = payload.panicEventId
+        logDeliveryDecision(payload, distanceKm, "DELIVERED", null)
         Log.i(logTag, "REALTIME_EVENT_ACCEPTED id=${payload.panicEventId}")
         Log.i(logTag, "PANIC_RECEIVED_RECEPTOR id=${payload.panicEventId}")
         showHeadsUpNotification(payload, distanceKm)
@@ -285,6 +299,38 @@ class PanicRealtimeListener(
         if (activeAlertId.isNullOrBlank() || activeAlertId != payload.panicEventId) {
             return
         }
+        if (!SecurityStateStore.isOnline()) {
+            logDeliveryDecision(payload.panicEventId, payload.driverId, null, "SKIPPED", "OFFLINE")
+            return
+        }
+        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
+        if (!currentUserId.isNullOrBlank() && currentUserId == payload.driverId) {
+            logDeliveryDecision(payload.panicEventId, payload.driverId, null, "SKIPPED", "SELF")
+            return
+        }
+        val emitterOnline = isEmitterOnline(payload.driverId)
+        if (emitterOnline == false) {
+            logDeliveryDecision(payload.panicEventId, payload.driverId, null, "SKIPPED", "OFFLINE")
+            return
+        }
+        val cachedLocation = resolveReceiverLocation()
+        if (cachedLocation == null) {
+            logDeliveryDecision(payload.panicEventId, payload.driverId, null, "SKIPPED", "NO_LOCATION")
+            return
+        }
+        val distanceKm = withContext(Dispatchers.Default) {
+            PanicMath.distanceKm(
+                cachedLocation.lat,
+                cachedLocation.lng,
+                payload.latitude,
+                payload.longitude
+            )
+        }
+        if (distanceKm > radiusKm) {
+            logDeliveryDecision(payload.panicEventId, payload.driverId, distanceKm, "SKIPPED", "OUT_OF_RADIUS")
+            return
+        }
+        logDeliveryDecision(payload.panicEventId, payload.driverId, distanceKm, "DELIVERED", null)
         withContext(Dispatchers.Main) {
             onAlertLocation(
                 DriverLocation(
@@ -295,6 +341,15 @@ class PanicRealtimeListener(
                     updatedAt = payload.updatedAt
                 )
             )
+        }
+    }
+
+    private suspend fun isEmitterOnline(driverId: String): Boolean? {
+        return try {
+            driverRepository.getDriverByUserId(driverId)?.isOnline
+        } catch (e: Exception) {
+            Log.w(logTag, "Failed to load driver online status", e)
+            null
         }
     }
 
@@ -320,6 +375,58 @@ class PanicRealtimeListener(
             lastKnownLocation = CachedLocation(current.lat, current.lng, current.timestamp)
         }
         return lastKnownLocation
+    }
+
+    private suspend fun resolveReceiverLocation(): CachedLocation? {
+        val cached = refreshLastKnownLocation()
+        if (cached != null) {
+            return cached
+        }
+        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id ?: return null
+        return try {
+            val record = driverRepository.getDriverByUserId(currentUserId)
+            val location = parseLocationText(record?.location) ?: return null
+            CachedLocation(location.first, location.second, System.currentTimeMillis())
+        } catch (e: Exception) {
+            Log.w(logTag, "Failed to load receiver location", e)
+            null
+        }
+    }
+
+    private fun parseLocationText(value: String?): Pair<Double, Double>? {
+        if (value.isNullOrBlank()) return null
+        val trimmed = value.substringAfter("POINT").substringAfter("(").substringBefore(")")
+        val parts = trimmed.replace(",", " ").trim().split(Regex("\\s+"))
+        if (parts.size < 2) return null
+        val lng = parts[0].toDoubleOrNull() ?: return null
+        val lat = parts[1].toDoubleOrNull() ?: return null
+        return lat to lng
+    }
+
+    private fun logDeliveryDecision(
+        payload: PanicAlertPayload,
+        distanceKm: Double?,
+        decision: String,
+        reason: String?
+    ) {
+        logDeliveryDecision(payload.panicEventId, payload.driverId, distanceKm, decision, reason)
+    }
+
+    private fun logDeliveryDecision(
+        eventId: String,
+        driverId: String,
+        distanceKm: Double?,
+        decision: String,
+        reason: String?
+    ) {
+        val distance = distanceKm?.let { String.format(Locale.US, "%.2f", it) } ?: "null"
+        val reasonText = reason ?: "none"
+        Log.i(
+            logTag,
+            "PANIC_EVENT_RECEIVED event_id=$eventId EMITTER_ID=$driverId " +
+                "DISTANCE_TO_EMITTER=$distance IS_ONLINE=${SecurityStateStore.isOnline()} " +
+                "DELIVERY_DECISION=$decision reason=$reasonText"
+        )
     }
 
     private fun pruneProcessed(nowMs: Long) {

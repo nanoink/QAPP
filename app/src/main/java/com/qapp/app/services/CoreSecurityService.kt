@@ -178,7 +178,17 @@ class CoreSecurityService : Service() {
             if (!vehicleAllowed) {
                 return@launch
             }
+            val last = LocationStateStore.get()
+            val lat = last?.lat
+            val lng = last?.lng
+            val outcome = panicService.triggerPanic(reason, lat, lng)
+            if (outcome == null) {
+                logger.warning("CoreSecurityService: panic insert failed; activation aborted")
+                return@launch
+            }
+            lastPanicSource = reason
             PanicStateManager.activatePanic(reason)
+            PanicStateManager.setActiveEventId(outcome.eventId.toString())
             SecurityStateStore.setState(SecurityState.PANIC)
             logger.info("CoreSecurityService: start panic")
             updateWakeLock()
@@ -189,11 +199,7 @@ class CoreSecurityService : Service() {
             if (!isServiceRunning(VoiceTriggerService::class.java.name)) {
                 ensureVoiceTriggerService()
             }
-            lastPanicSource = reason
-            val last = LocationStateStore.get()
-            val lat = last?.lat
-            val lng = last?.lng
-            panicPublished = panicService.triggerPanic(reason, lat, lng)
+            panicPublished = true
         }
     }
 
@@ -414,10 +420,12 @@ class CoreSecurityService : Service() {
     private suspend fun publishPanicIfNeeded() {
         if (!PanicStateManager.isPanicActive()) return
         if (panicPublished) return
+        if (PanicStateManager.getActiveEventId().isNullOrBlank()) return
         val last = LocationStateStore.get()
         val lat = last?.lat
         val lng = last?.lng
-        panicPublished = panicService.triggerPanic(lastPanicSource, lat, lng)
+        val outcome = panicService.triggerPanic(lastPanicSource, lat, lng)
+        panicPublished = outcome != null
     }
 
     companion object {

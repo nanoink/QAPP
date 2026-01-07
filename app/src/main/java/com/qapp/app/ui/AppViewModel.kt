@@ -225,14 +225,6 @@ class AppViewModel(
             if (!allowed) {
                 return@launch
             }
-            panicManager.startPanic()
-            PanicStateManager.activatePanic(source)
-            _isPanicActive.value = panicManager.isPanicActive()
-            if (source == "VOICE") {
-                Log.d("PANIC", "PANIC_ACTIVATED_FROM_VOICE")
-            } else {
-                Log.d("PANIC", "PANIC_ACTIVATED_FROM_BUTTON")
-            }
             CoreSecurityService.triggerPanic(getApplication<Application>(), source)
         }
     }

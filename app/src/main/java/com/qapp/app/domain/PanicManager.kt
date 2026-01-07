@@ -73,14 +73,11 @@ class PanicManager(
         return createMutex.withLock {
             val userId = userIdProvider()
             if (userId.isNullOrBlank()) {
-                Log.w("QAPP_PANIC", "PANIC_EVENT_DELAYED_USER_NOT_READY")
-                PanicStateManager.setPending(true)
                 return@withLock Result.failure(PanicUserMissingException())
             }
             if (location == null) {
                 val error = IllegalStateException("Missing location")
                 Log.w("QAPP_PANIC", "PANIC_INSERT_ERROR: ${error.message}")
-                PanicStateManager.setPending(true)
                 return@withLock Result.failure(error)
             }
             val current = activeEventId ?: PanicStateManager.getActiveEventId()?.let { stored ->
@@ -95,8 +92,6 @@ class PanicManager(
                 val parsed = runCatching { UUID.fromString(existingId) }.getOrNull()
                 if (parsed != null) {
                     activeEventId = parsed
-                    PanicStateManager.setActiveEventId(existingId)
-                    PanicStateManager.setPending(false)
                     Log.i("QAPP_PANIC", "Panic event already active id=$existingId")
                     return@withLock Result.success(PanicCreateResult(parsed, created = false))
                 }
@@ -111,13 +106,9 @@ class PanicManager(
             result.fold(
                 onSuccess = { id ->
                     activeEventId = id
-                    PanicStateManager.setActiveEventId(id.toString())
-                    PanicStateManager.setPending(false)
                     Log.i("QAPP_PANIC", "PANIC_EVENT_CREATED id=$id")
                 },
-                onFailure = {
-                    PanicStateManager.setPending(true)
-                }
+                onFailure = { }
             )
             result.map { PanicCreateResult(it, created = true) }
         }
@@ -134,7 +125,7 @@ class PanicManager(
         }
         if (eventId == null) {
             clearActiveEvent()
-            return PanicResolveOutcome.ALREADY_ENDED
+            return PanicResolveOutcome.MISSING_ID
         }
         val result = repository.resolvePanicEvent(eventId)
         val updated = result.getOrElse { 0 }

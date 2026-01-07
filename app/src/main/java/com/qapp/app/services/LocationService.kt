@@ -25,6 +25,7 @@ import com.qapp.app.core.CoreConfig
 import com.qapp.app.core.DefensiveModeManager
 import com.qapp.app.core.LocationStateStore
 import com.qapp.app.core.LogTags
+import com.qapp.app.core.PanicState
 import com.qapp.app.core.PanicStateManager
 import com.qapp.app.core.RealtimeManager
 import com.qapp.app.core.SecurityStateStore
@@ -32,6 +33,7 @@ import com.qapp.app.core.SupabaseClientProvider
 import com.qapp.app.core.connectivity.ConnectivityMonitor
 import com.qapp.app.core.location.GpsStatusMonitor
 import com.qapp.app.data.repository.LocationRepository
+import com.qapp.app.data.repository.PanicRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -54,6 +56,7 @@ class LocationService : Service() {
     private val logTag = "LocationService"
     private val logger = Logger.getLogger(LocationService::class.java.name)
     private lateinit var repository: LocationRepository
+    private val panicRepository = PanicRepository()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var fusedClient: FusedLocationProviderClient
     private var locationCallback: LocationCallback? = null
@@ -321,9 +324,24 @@ class LocationService : Service() {
     }
 
     private suspend fun publishPanicLocation(location: Location) {
+        if (PanicStateManager.getState() != PanicState.ACTIVE) {
+            return
+        }
         val panicId = PanicStateManager.getActiveEventId()
         if (panicId.isNullOrBlank()) {
             return
+        }
+        Log.i("QAPP_PANIC", "PANIC_LOCATION_UPDATE_ATTEMPT event_id=$panicId")
+        val updateResult = panicRepository.updatePanicLocation(
+            eventId = panicId,
+            lat = location.latitude,
+            lng = location.longitude
+        )
+        if (updateResult.isSuccess) {
+            Log.i("QAPP_PANIC", "PANIC_LOCATION_UPDATE_SUCCESS event_id=$panicId")
+        } else {
+            val error = updateResult.exceptionOrNull()
+            Log.e("QAPP_PANIC", "PANIC_LOCATION_UPDATE_FAILED error=${error?.message}", error)
         }
         val userId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
         if (userId.isNullOrBlank()) {

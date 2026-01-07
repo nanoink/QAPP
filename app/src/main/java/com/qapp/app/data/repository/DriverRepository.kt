@@ -206,6 +206,9 @@ class DriverRepository(
 data class DriverRecord(
     val id: String,
     val name: String? = null,
+    @SerialName("is_online")
+    val isOnline: Boolean? = null,
+    val location: String? = null,
     val city: String? = null,
     @SerialName("group_id")
     val groupId: String? = null,

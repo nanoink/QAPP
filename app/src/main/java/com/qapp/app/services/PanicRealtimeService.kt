@@ -25,6 +25,7 @@ import com.qapp.app.core.PanicAlertPayload
 import com.qapp.app.core.PanicMath
 import com.qapp.app.core.PanicStateManager
 import com.qapp.app.core.PanicResolvedPayload
+import com.qapp.app.core.PanicLocationPayload
 import com.qapp.app.core.SecurityStateStore
 import com.qapp.app.core.SupabaseClientProvider
 import com.qapp.app.data.repository.VehicleInfo
@@ -158,6 +159,11 @@ class PanicRealtimeService : Service() {
                     }
                 }
                 launch {
+                    channel.broadcastFlow<PanicLocationPayload>(EVENT_PANIC_LOCATION).collect { payload ->
+                        handleLocationBroadcast(payload)
+                    }
+                }
+                launch {
                     channel.broadcastFlow<PanicResolvedPayload>(EVENT_PANIC_RESOLVED).collect { payload ->
                         handleResolvedBroadcast(payload)
                     }
@@ -192,11 +198,13 @@ class PanicRealtimeService : Service() {
             logDecision(eventId, driverId, null, true, "SKIPPED", "OFFLINE")
             return
         }
-        val location = record.latLng()
+        val location = record.latLngFromFields(eventId)
         if (location == null) {
+            logLocationMissing(eventId)
             logDecision(eventId, driverId, null, true, "SKIPPED", "NO_LOCATION")
             return
         }
+        logLocationUsed(location.first, location.second)
         val ownLocation = resolveReceiverLocation()
         if (ownLocation == null) {
             logDecision(eventId, driverId, null, true, "SKIPPED", "NO_LOCATION")
@@ -208,6 +216,7 @@ class PanicRealtimeService : Service() {
             location.first,
             location.second
         )
+        logDistanceCalculated(distanceKm)
         if (distanceKm > ALERT_RADIUS_KM) {
             logDecision(eventId, driverId, distanceKm, true, "SKIPPED", "OUT_OF_RADIUS")
             return
@@ -271,12 +280,14 @@ class PanicRealtimeService : Service() {
             logDecision(eventId, driverId, null, online, "SKIPPED", "NO_LOCATION")
             return
         }
+        logLocationUsed(payload.latitude, payload.longitude)
         val distanceKm = PanicMath.distanceKm(
             ownLocation.first,
             ownLocation.second,
             payload.latitude,
             payload.longitude
         )
+        logDistanceCalculated(distanceKm)
         if (distanceKm > ALERT_RADIUS_KM) {
             logDecision(eventId, driverId, distanceKm, online, "SKIPPED", "OUT_OF_RADIUS")
             return
@@ -313,6 +324,14 @@ class PanicRealtimeService : Service() {
         releaseWakeLock()
     }
 
+    private suspend fun handleLocationBroadcast(payload: PanicLocationPayload) {
+        handleActiveLocationUpdate(
+            eventId = payload.panicEventId,
+            driverId = payload.driverId,
+            location = payload.latitude to payload.longitude
+        )
+    }
+
     private suspend fun handleUpdate(record: JsonObject) {
         val eventId = record.string("id") ?: return
         val isActive = record.boolean("is_active")
@@ -324,8 +343,9 @@ class PanicRealtimeService : Service() {
             return
         }
         val driverId = record.string("driver_id") ?: return
-        val location = record.latLng()
+        val location = record.latLngFromFields(eventId)
         if (location == null) {
+            logLocationMissing(eventId)
             logDecision(eventId, driverId, null, true, "SKIPPED", "NO_LOCATION")
             return
         }
@@ -356,12 +376,14 @@ class PanicRealtimeService : Service() {
             logDecision(eventId, driverId, null, true, "SKIPPED", "NO_LOCATION")
             return
         }
+        logLocationUsed(location.first, location.second)
         val distanceKm = PanicMath.distanceKm(
             ownLocation.first,
             ownLocation.second,
             location.first,
             location.second
         )
+        logDistanceCalculated(distanceKm)
         if (distanceKm > ALERT_RADIUS_KM) {
             logDecision(eventId, driverId, distanceKm, true, "SKIPPED", "OUT_OF_RADIUS")
             return
@@ -542,39 +564,31 @@ class PanicRealtimeService : Service() {
 
     private fun JsonObject.boolean(key: String): Boolean? = this[key]?.jsonPrimitive?.booleanOrNull
 
-    private fun JsonObject.latLng(): Pair<Double, Double>? {
+    private fun JsonObject.latLngFromFields(eventId: String): Pair<Double, Double>? {
         val lat = this["lat"]?.jsonPrimitive?.doubleOrNull
         val lng = this["lng"]?.jsonPrimitive?.doubleOrNull
-        if (lat != null && lng != null) {
-            return lat to lng
+        if (lat == null || lng == null) {
+            logLocationMissing(eventId)
+            return null
         }
-        val locationValue = this["location"]
-        return parseLocation(locationValue)
+        if (!lat.isFinite() || !lng.isFinite()) {
+            logLocationMissing(eventId)
+            return null
+        }
+        return lat to lng
     }
 
-    private fun parseLocation(value: JsonElement?): Pair<Double, Double>? {
-        val text = value?.jsonPrimitive?.contentOrNull
-        if (!text.isNullOrBlank()) {
-            val trimmed = text.substringAfter("POINT").substringAfter("(").substringBefore(")")
-            val parts = trimmed.replace(",", " ").trim().split(Regex("\\s+"))
-            if (parts.size >= 2) {
-                val lng = parts[0].toDoubleOrNull()
-                val lat = parts[1].toDoubleOrNull()
-                if (lat != null && lng != null) {
-                    return lat to lng
-                }
-            }
-        }
-        val obj = value?.jsonObject
-        val coordinates = obj?.get("coordinates")
-        if (coordinates is JsonArray && coordinates.size >= 2) {
-            val lng = coordinates[0].jsonPrimitive.doubleOrNull
-            val lat = coordinates[1].jsonPrimitive.doubleOrNull
-            if (lat != null && lng != null) {
-                return lat to lng
-            }
-        }
-        return null
+    private fun logLocationMissing(eventId: String) {
+        Log.w(logTag, "PANIC_LOCATION_MISSING event_id=$eventId")
+    }
+
+    private fun logLocationUsed(lat: Double, lng: Double) {
+        Log.i(logTag, "PANIC_LOCATION_USED lat=$lat lng=$lng")
+    }
+
+    private fun logDistanceCalculated(distanceKm: Double) {
+        val km = String.format(Locale.US, "%.2f", distanceKm)
+        Log.i(logTag, "DISTANCE_CALCULATED km=$km")
     }
 
     private suspend fun isEmitterOnline(driverId: String): Boolean? {
@@ -647,6 +661,7 @@ class PanicRealtimeService : Service() {
         private const val ALERT_RADIUS_KM = 10.0
         private const val EVENT_PANIC = "panic"
         private const val EVENT_PANIC_RESOLVED = "panic_resolved"
+        private const val EVENT_PANIC_LOCATION = "panic_location"
         private const val PROCESSED_TTL_MS = 10 * 60 * 1000L
         const val EXTRA_ALERT_EVENT_ID = "extra_alert_event_id"
         const val EXTRA_ALERT_DRIVER_ID = "extra_alert_driver_id"

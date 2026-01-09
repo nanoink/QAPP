@@ -30,6 +30,7 @@ import com.qapp.app.core.PanicLocationPayload
 import com.qapp.app.core.SecurityStateStore
 import com.qapp.app.core.SupabaseClientProvider
 import com.qapp.app.data.repository.VehicleInfo
+import com.qapp.app.nearby.NearbyDriversMonitor
 import io.github.jan.supabase.gotrue.auth
 import io.github.jan.supabase.realtime.PostgresAction
 import io.github.jan.supabase.realtime.broadcastFlow
@@ -77,6 +78,7 @@ class PanicRealtimeService : Service() {
         PanicStateManager.init(applicationContext)
         SecurityStateStore.init(applicationContext)
         LocationStateStore.init(applicationContext)
+        NearbyDriversMonitor.start()
         createServiceChannel()
         startForegroundWithType()
         startListening()
@@ -109,6 +111,7 @@ class PanicRealtimeService : Service() {
         }
         realtimeHealthy.set(false)
         guard?.stop()
+        NearbyDriversMonitor.stop()
         releaseWakeLock()
         scope.cancel()
     }

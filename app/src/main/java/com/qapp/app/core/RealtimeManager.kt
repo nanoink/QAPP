@@ -18,6 +18,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.serializer
 
 object RealtimeManager {
 
@@ -139,9 +142,7 @@ object RealtimeManager {
             status = "active",
             isActive = true
         )
-        val channel = client.realtime.channel(CHANNEL_NAME)
-        channel.broadcast(EVENT_PANIC, payload)
-        client.realtime.removeChannel(channel)
+        broadcastEvent(EVENT_PANIC, payload)
     }
 
     suspend fun sendPanicResolved(
@@ -152,9 +153,7 @@ object RealtimeManager {
             panicEventId = panicId,
             driverId = driverId
         )
-        val channel = client.realtime.channel(CHANNEL_NAME)
-        channel.broadcast(EVENT_PANIC_RESOLVED, payload)
-        client.realtime.removeChannel(channel)
+        broadcastEvent(EVENT_PANIC_RESOLVED, payload)
     }
 
     suspend fun sendPanicLocationUpdate(
@@ -173,9 +172,32 @@ object RealtimeManager {
             heading = heading,
             updatedAt = updatedAt
         )
-        val channel = client.realtime.channel(CHANNEL_NAME)
-        channel.broadcast(EVENT_PANIC_LOCATION, payload)
-        client.realtime.removeChannel(channel)
+        broadcastEvent(EVENT_PANIC_LOCATION, payload)
+    }
+
+    private suspend inline fun <reified T> broadcastEvent(event: String, payload: T) {
+        val jsonPayload = Json.encodeToJsonElement(serializer(), payload).jsonObject
+        val activeChannel = channel
+        if (connected && activeChannel != null) {
+            try {
+                activeChannel.broadcast(event, jsonPayload)
+                Log.d(TAG, "Broadcast sent event=$event")
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "Broadcast failed on active channel event=$event", e)
+            }
+        }
+        try {
+            client.realtime.connect()
+            val tempChannel = client.realtime.channel(CHANNEL_NAME)
+            tempChannel.subscribe()
+            tempChannel.broadcast(event, jsonPayload)
+            tempChannel.unsubscribe()
+            client.realtime.removeChannel(tempChannel)
+            Log.d(TAG, "Broadcast sent on temp channel event=$event")
+        } catch (e: Exception) {
+            Log.e(TAG, "Broadcast failed event=$event", e)
+        }
     }
 
     internal suspend fun emitTestAlert(message: PanicAlertMessage) {

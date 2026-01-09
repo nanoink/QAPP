@@ -44,6 +44,7 @@ import com.qapp.app.domain.AccessResult
 import com.qapp.app.domain.AccessValidator
 import com.qapp.app.domain.Driver
 import com.qapp.app.domain.PanicManager
+import com.qapp.app.nearby.NearbyDriversMonitor
 import com.qapp.app.services.CoreSecurityService
 import com.qapp.app.services.PanicRealtimeService
 import io.github.jan.supabase.gotrue.auth
@@ -367,6 +368,7 @@ class AppViewModel(
                 SecurityStateStore.setState(SecurityState.ONLINE)
                 CoreSecurityService.goOnline(appContext)
                 PanicRealtimeService.startIfAllowed(appContext)
+                NearbyDriversMonitor.start()
                 startAlertListener()
             } else {
                 SecurityStateStore.setState(SecurityState.OFFLINE)
@@ -402,6 +404,7 @@ class AppViewModel(
             SecurityStateStore.init(appContext)
             repo.setOffline()
             SecurityStateStore.setState(SecurityState.OFFLINE)
+            NearbyDriversMonitor.stop()
             stopAlertListener()
             CoreSecurityService.goOffline(appContext)
             _isOnline.value = false

@@ -17,19 +17,19 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.qapp.app.MainActivity
 import com.qapp.app.R
+import com.qapp.app.alerts.PanicAlertManager
+import com.qapp.app.alerts.PanicEvent
 import com.qapp.app.core.IncomingPanicAlertStore
 import com.qapp.app.core.LocationStateStore
 import com.qapp.app.core.PanicEventGuard
 import com.qapp.app.core.PanicAlertPendingStore
 import com.qapp.app.core.PanicAlertPayload
-import com.qapp.app.core.PanicMath
 import com.qapp.app.core.PanicStateManager
 import com.qapp.app.core.PanicResolvedPayload
 import com.qapp.app.core.PanicLocationPayload
 import com.qapp.app.core.SecurityStateStore
 import com.qapp.app.core.SupabaseClientProvider
 import com.qapp.app.data.repository.VehicleInfo
-import com.qapp.app.data.repository.DriverRepository
 import io.github.jan.supabase.gotrue.auth
 import io.github.jan.supabase.realtime.PostgresAction
 import io.github.jan.supabase.realtime.broadcastFlow
@@ -70,7 +70,6 @@ class PanicRealtimeService : Service() {
     private val realtimeHealthy = AtomicBoolean(false)
     private var wakeLock: PowerManager.WakeLock? = null
     private val processedEvents = LinkedHashMap<String, Long>()
-    private val driverRepository = DriverRepository()
 
     override fun onCreate() {
         super.onCreate()
@@ -222,68 +221,33 @@ class PanicRealtimeService : Service() {
             Log.i(logTag, "PANIC_EVENT_DEDUPLICATED id=$eventId")
             return
         }
-        if (!SecurityStateStore.isOnline()) {
-            logDecision(eventId, driverId, null, false, "SKIPPED", "OFFLINE")
-            return
-        }
-        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
-        if (!currentUserId.isNullOrBlank() && currentUserId == driverId) {
-            logDecision(eventId, driverId, null, true, "SKIPPED", "SELF")
-            return
-        }
-        val emitterOnline = isEmitterOnline(driverId)
-        if (emitterOnline == false) {
-            logDecision(eventId, driverId, null, true, "SKIPPED", "OFFLINE")
-            return
-        }
         val location = record.latLngFromFields()
         if (location == null) {
             Log.w(logTag, "PANIC_EVENT_SKIPPED_NO_COORDINATES event_id=$eventId")
             logDecision(eventId, driverId, null, true, "SKIPPED", "NO_COORDINATES")
             return
         }
-        Log.i(logTag, "PANIC_EVENT_VALID lat=${location.first} lng=${location.second}")
-        logLocationUsed(location.first, location.second)
-        val ownLocation = resolveReceiverLocation()
-        if (ownLocation == null) {
-            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_RECEIVER_LOCATION")
-            return
-        }
-        val distanceKm = PanicMath.distanceKm(
-            ownLocation.first,
-            ownLocation.second,
-            location.first,
-            location.second
-        )
-        logDistanceCalculated(distanceKm)
-        if (distanceKm > ALERT_RADIUS_KM) {
-            logDecision(eventId, driverId, distanceKm, true, "SKIPPED", "OUT_OF_RADIUS")
-            return
-        }
-        logDecision(eventId, driverId, distanceKm, true, "DELIVERED", null)
-        markProcessed(eventId)
-        val now = System.currentTimeMillis()
         val vehicle = VehicleInfo(
             make = record.string("vehicle_brand") ?: record.string("vehicle_make"),
             model = record.string("vehicle_model"),
             plate = record.string("vehicle_plate"),
             color = record.string("vehicle_color")
         )
-        IncomingPanicAlertStore.showAlert(
-            eventId = eventId,
-            driverId = driverId,
-            driverName = record.string("driver_name"),
-            lat = location.first,
-            lng = location.second,
-            distanceKm = distanceKm,
-            startedAtMs = now,
-            muted = false,
-            vehicle = vehicle
+        val accepted = PanicAlertManager.handleIncomingPanic(
+            PanicEvent(
+                id = eventId,
+                driverId = driverId,
+                lat = location.first,
+                lng = location.second,
+                isActive = true,
+                driverName = record.string("driver_name"),
+                vehicle = vehicle
+            )
         )
-        Log.i(logTag, "PANIC_UI_OPENED event_id=$eventId")
-        PanicAlertPendingStore.save(eventId, driverId, now)
-        acquireWakeLock()
-        showAlertNotification(eventId, driverId)
+        if (accepted) {
+            markProcessed(eventId)
+            acquireWakeLock()
+        }
     }
 
     private suspend fun handleFallbackAlert(alert: PanicEventGuard.FallbackAlert) {
@@ -300,61 +264,27 @@ class PanicRealtimeService : Service() {
             Log.i(logTag, "PANIC_EVENT_DEDUPLICATED id=$eventId")
             return
         }
-        val online = SecurityStateStore.isOnline()
-        if (!online) {
-            logDecision(eventId, driverId, null, false, "SKIPPED", "OFFLINE")
-            return
-        }
-        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
-        if (!currentUserId.isNullOrBlank() && currentUserId == driverId) {
-            logDecision(eventId, driverId, null, true, "SKIPPED", "SELF")
-            return
-        }
-        val emitterOnline = isEmitterOnline(driverId)
-        if (emitterOnline == false) {
-            logDecision(eventId, driverId, null, online, "SKIPPED", "OFFLINE")
-            return
-        }
-        val ownLocation = resolveReceiverLocation()
-        if (ownLocation == null) {
-            logDecision(eventId, driverId, null, online, "SKIPPED", "NO_RECEIVER_LOCATION")
-            return
-        }
-        logLocationUsed(payload.latitude, payload.longitude)
-        val distanceKm = PanicMath.distanceKm(
-            ownLocation.first,
-            ownLocation.second,
-            payload.latitude,
-            payload.longitude
-        )
-        logDistanceCalculated(distanceKm)
-        if (distanceKm > ALERT_RADIUS_KM) {
-            logDecision(eventId, driverId, distanceKm, online, "SKIPPED", "OUT_OF_RADIUS")
-            return
-        }
-        logDecision(eventId, driverId, distanceKm, online, "DELIVERED", null)
-        markProcessed(eventId)
-        val now = System.currentTimeMillis()
         val vehicle = VehicleInfo(
             make = payload.vehicleBrand ?: payload.vehicleMake,
             model = payload.vehicleModel,
             plate = payload.vehiclePlate,
             color = payload.vehicleColor
         )
-        IncomingPanicAlertStore.showAlert(
-            eventId = eventId,
-            driverId = driverId,
-            driverName = payload.driverName,
-            lat = payload.latitude,
-            lng = payload.longitude,
-            distanceKm = distanceKm,
-            startedAtMs = now,
-            muted = false,
-            vehicle = vehicle
+        val accepted = PanicAlertManager.handleIncomingPanic(
+            PanicEvent(
+                id = eventId,
+                driverId = driverId,
+                lat = payload.latitude,
+                lng = payload.longitude,
+                isActive = payload.isActive,
+                driverName = payload.driverName,
+                vehicle = vehicle
+            )
         )
-        PanicAlertPendingStore.save(eventId, driverId, now)
-        acquireWakeLock()
-        showAlertNotification(eventId, driverId)
+        if (accepted) {
+            markProcessed(eventId)
+            acquireWakeLock()
+        }
     }
 
     private suspend fun handleResolvedBroadcast(payload: PanicResolvedPayload) {
@@ -406,27 +336,14 @@ class PanicRealtimeService : Service() {
             logDecision(eventId, driverId, null, true, "SKIPPED", "SELF")
             return
         }
-        val emitterOnline = isEmitterOnline(driverId)
-        if (emitterOnline == false) {
-            logDecision(eventId, driverId, null, true, "SKIPPED", "OFFLINE")
-            return
-        }
-        val ownLocation = resolveReceiverLocation()
-        if (ownLocation == null) {
-            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_RECEIVER_LOCATION")
-            return
-        }
-        logLocationUsed(location.first, location.second)
-        val distanceKm = PanicMath.distanceKm(
-            ownLocation.first,
-            ownLocation.second,
-            location.first,
-            location.second
-        )
-        logDistanceCalculated(distanceKm)
-        if (distanceKm > ALERT_RADIUS_KM) {
-            logDecision(eventId, driverId, distanceKm, true, "SKIPPED", "OUT_OF_RADIUS")
-            return
+        val current = LocationStateStore.get()
+        val distanceKm = current?.let {
+            com.qapp.app.core.PanicMath.distanceKm(
+                it.lat,
+                it.lng,
+                location.first,
+                location.second
+            )
         }
         logDecision(eventId, driverId, distanceKm, true, "DELIVERED", null)
         IncomingPanicAlertStore.updateLocation(
@@ -616,49 +533,6 @@ class PanicRealtimeService : Service() {
         return lat to lng
     }
 
-    private fun logLocationUsed(lat: Double, lng: Double) {
-        Log.i(logTag, "PANIC_LOCATION_USED lat=$lat lng=$lng")
-    }
-
-    private fun logDistanceCalculated(distanceKm: Double) {
-        val km = String.format(Locale.US, "%.2f", distanceKm)
-        Log.i(logTag, "DISTANCE_CALCULATED km=$km")
-    }
-
-    private suspend fun isEmitterOnline(driverId: String): Boolean? {
-        return try {
-            driverRepository.getDriverByUserId(driverId)?.isOnline
-        } catch (e: Exception) {
-            Log.w(logTag, "Failed to load driver online status", e)
-            null
-        }
-    }
-
-    private suspend fun resolveReceiverLocation(): Pair<Double, Double>? {
-        val cached = LocationStateStore.get()
-        if (cached != null) {
-            return cached.lat to cached.lng
-        }
-        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id ?: return null
-        return try {
-            val driver = driverRepository.getDriverByUserId(currentUserId)
-            parseLocationText(driver?.location)
-        } catch (e: Exception) {
-            Log.w(logTag, "Failed to load receiver location", e)
-            null
-        }
-    }
-
-    private fun parseLocationText(value: String?): Pair<Double, Double>? {
-        if (value.isNullOrBlank()) return null
-        val trimmed = value.substringAfter("POINT").substringAfter("(").substringBefore(")")
-        val parts = trimmed.replace(",", " ").trim().split(Regex("\\s+"))
-        if (parts.size < 2) return null
-        val lng = parts[0].toDoubleOrNull() ?: return null
-        val lat = parts[1].toDoubleOrNull() ?: return null
-        return lat to lng
-    }
-
     private fun buildFallbackRecord(alert: PanicEventGuard.FallbackAlert): JsonObject {
         return kotlinx.serialization.json.buildJsonObject {
             put("id", kotlinx.serialization.json.JsonPrimitive(alert.eventId))
@@ -691,7 +565,6 @@ class PanicRealtimeService : Service() {
         private const val SERVICE_CHANNEL_ID = "panic_realtime_service"
         private const val ALERT_CHANNEL_ID = "panic_realtime_alerts"
         private const val SERVICE_NOTIFICATION_ID = 3301
-        private const val ALERT_RADIUS_KM = 10.0
         private const val EVENT_PANIC = "panic"
         private const val EVENT_PANIC_RESOLVED = "panic_resolved"
         private const val EVENT_PANIC_LOCATION = "panic_location"

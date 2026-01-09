@@ -11,6 +11,7 @@ import com.qapp.app.core.SecurityStateStore
 import com.qapp.app.core.SupabaseClientProvider
 import com.qapp.app.data.repository.NearbyDriversRepository
 import com.qapp.app.nearby.DriverLocation
+import com.qapp.app.nearby.DriversNearbyRepository
 import com.qapp.app.nearby.NearbyDriversRegistry
 import com.qapp.app.nearby.distanceKm
 import io.github.jan.supabase.SupabaseClient
@@ -102,7 +103,6 @@ class DriversNearbyViewModel(
 
         CoroutineScope(Dispatchers.Main).launch {
             _drivers.value = emptyList()
-            NearbyDriversRegistry.update(emptyList())
         }
     }
 
@@ -167,6 +167,7 @@ class DriversNearbyViewModel(
         withContext(Dispatchers.Main) {
             _drivers.value = list
             NearbyDriversRegistry.update(list)
+            DriversNearbyRepository.updateDrivers(list)
         }
         Log.d(TAG, "nearbyDrivers=${list.size}")
     }

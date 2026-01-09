@@ -13,7 +13,6 @@ import com.qapp.app.data.repository.DriverLocation
 import com.qapp.app.data.repository.PanicEventRecord
 import com.qapp.app.data.repository.DriverProfile
 import com.qapp.app.data.repository.VehicleInfo
-import com.qapp.app.data.repository.DriverRepository
 import com.qapp.app.ui.AlertSystemStatus
 import com.qapp.app.MainActivity
 import com.qapp.app.core.CoreConfig
@@ -24,6 +23,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import com.qapp.app.nearby.DriversNearbyRepository
 
 class PanicRealtimeListener(
     context: Context,
@@ -41,7 +41,6 @@ class PanicRealtimeListener(
     private var lastKnownLocation: CachedLocation? = null
     private var systemStatusCallback: ((AlertSystemStatus) -> Unit)? = null
     private val antiSpamManager = PanicAntiSpamManager()
-    private val driverRepository = DriverRepository()
 
     fun start(
         onAlertStarted: (PanicEventRecord, DriverProfile?, VehicleInfo?, Boolean) -> Unit,
@@ -111,26 +110,6 @@ class PanicRealtimeListener(
             Log.w(logTag, "PANIC_EVENT_MISSING_VEHICLE id=${payload.panicEventId}")
         }
         pruneProcessed(now)
-        if (!SecurityStateStore.isOnline()) {
-            logDeliveryDecision(payload, null, "SKIPPED", "OFFLINE")
-            logIgnored("offline", payload)
-            processedEvents[payload.panicEventId] = now
-            return
-        }
-        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
-        if (!currentUserId.isNullOrBlank() && currentUserId == payload.driverId) {
-            logDeliveryDecision(payload, null, "SKIPPED", "SELF")
-            logIgnored("self", payload)
-            processedEvents[payload.panicEventId] = now
-            return
-        }
-        val emitterOnline = isEmitterOnline(payload.driverId)
-        if (emitterOnline == false) {
-            logDeliveryDecision(payload, null, "SKIPPED", "OFFLINE")
-            logIgnored("offline", payload)
-            processedEvents[payload.panicEventId] = now
-            return
-        }
         if (!payload.isActive) {
             logIgnored("expired", payload)
             processedEvents[payload.panicEventId] = now
@@ -145,28 +124,26 @@ class PanicRealtimeListener(
             logIgnored("duplicate", payload)
             return
         }
-        val cachedLocation = resolveReceiverLocation()
-        if (cachedLocation == null) {
-            logDeliveryDecision(payload, null, "SKIPPED", "NO_LOCATION")
-            logIgnored("no_location", payload)
+        if (!shouldReceiveFromNearby(payload.driverId)) {
+            logDeliveryDecision(payload, null, "SKIPPED", "NOT_IN_NEARBY")
+            logIgnored("not_eligible", payload)
             processedEvents[payload.panicEventId] = now
             return
         }
+        val cachedLocation = resolveReceiverLocation()
         val distanceKm = withContext(Dispatchers.Default) {
-            PanicMath.distanceKm(
-                cachedLocation.lat,
-                cachedLocation.lng,
-                payload.latitude,
-                payload.longitude
-            )
+            if (cachedLocation != null) {
+                PanicMath.distanceKm(
+                    cachedLocation.lat,
+                    cachedLocation.lng,
+                    payload.latitude,
+                    payload.longitude
+                )
+            } else {
+                radiusKm
+            }
         }
         Log.i(logTag, "Distance calculated: ${formatKm(distanceKm)} km")
-        if (distanceKm > radiusKm) {
-            logDeliveryDecision(payload, distanceKm, "SKIPPED", "OUT_OF_RADIUS")
-            logIgnored("distance", payload)
-            processedEvents[payload.panicEventId] = now
-            return
-        }
         val decision = withContext(Dispatchers.Default) {
             antiSpamManager.checkAndRecord(
                 PanicAntiSpamManager.PanicEventMeta(
@@ -299,36 +276,22 @@ class PanicRealtimeListener(
         if (activeAlertId.isNullOrBlank() || activeAlertId != payload.panicEventId) {
             return
         }
-        if (!SecurityStateStore.isOnline()) {
-            logDeliveryDecision(payload.panicEventId, payload.driverId, null, "SKIPPED", "OFFLINE")
-            return
-        }
-        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
-        if (!currentUserId.isNullOrBlank() && currentUserId == payload.driverId) {
-            logDeliveryDecision(payload.panicEventId, payload.driverId, null, "SKIPPED", "SELF")
-            return
-        }
-        val emitterOnline = isEmitterOnline(payload.driverId)
-        if (emitterOnline == false) {
-            logDeliveryDecision(payload.panicEventId, payload.driverId, null, "SKIPPED", "OFFLINE")
+        if (!shouldReceiveFromNearby(payload.driverId)) {
+            logDeliveryDecision(payload.panicEventId, payload.driverId, null, "SKIPPED", "NOT_IN_NEARBY")
             return
         }
         val cachedLocation = resolveReceiverLocation()
-        if (cachedLocation == null) {
-            logDeliveryDecision(payload.panicEventId, payload.driverId, null, "SKIPPED", "NO_LOCATION")
-            return
-        }
         val distanceKm = withContext(Dispatchers.Default) {
-            PanicMath.distanceKm(
-                cachedLocation.lat,
-                cachedLocation.lng,
-                payload.latitude,
-                payload.longitude
-            )
-        }
-        if (distanceKm > radiusKm) {
-            logDeliveryDecision(payload.panicEventId, payload.driverId, distanceKm, "SKIPPED", "OUT_OF_RADIUS")
-            return
+            if (cachedLocation != null) {
+                PanicMath.distanceKm(
+                    cachedLocation.lat,
+                    cachedLocation.lng,
+                    payload.latitude,
+                    payload.longitude
+                )
+            } else {
+                null
+            }
         }
         logDeliveryDecision(payload.panicEventId, payload.driverId, distanceKm, "DELIVERED", null)
         withContext(Dispatchers.Main) {
@@ -341,15 +304,6 @@ class PanicRealtimeListener(
                     updatedAt = payload.updatedAt
                 )
             )
-        }
-    }
-
-    private suspend fun isEmitterOnline(driverId: String): Boolean? {
-        return try {
-            driverRepository.getDriverByUserId(driverId)?.isOnline
-        } catch (e: Exception) {
-            Log.w(logTag, "Failed to load driver online status", e)
-            null
         }
     }
 
@@ -378,29 +332,16 @@ class PanicRealtimeListener(
     }
 
     private suspend fun resolveReceiverLocation(): CachedLocation? {
-        val cached = refreshLastKnownLocation()
-        if (cached != null) {
-            return cached
-        }
-        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id ?: return null
-        return try {
-            val record = driverRepository.getDriverByUserId(currentUserId)
-            val location = parseLocationText(record?.location) ?: return null
-            CachedLocation(location.first, location.second, System.currentTimeMillis())
-        } catch (e: Exception) {
-            Log.w(logTag, "Failed to load receiver location", e)
-            null
-        }
+        return refreshLastKnownLocation()
     }
 
-    private fun parseLocationText(value: String?): Pair<Double, Double>? {
-        if (value.isNullOrBlank()) return null
-        val trimmed = value.substringAfter("POINT").substringAfter("(").substringBefore(")")
-        val parts = trimmed.replace(",", " ").trim().split(Regex("\\s+"))
-        if (parts.size < 2) return null
-        val lng = parts[0].toDoubleOrNull() ?: return null
-        val lat = parts[1].toDoubleOrNull() ?: return null
-        return lat to lng
+    private fun shouldReceiveFromNearby(emitterId: String): Boolean {
+        if (!SecurityStateStore.isOnline()) return false
+        val currentUserId = SupabaseClientProvider.client.auth.currentUserOrNull()?.id
+        if (currentUserId.isNullOrBlank() || currentUserId == emitterId) {
+            return false
+        }
+        return DriversNearbyRepository.nearbyDrivers.value.any { it.id == emitterId }
     }
 
     private fun logDeliveryDecision(

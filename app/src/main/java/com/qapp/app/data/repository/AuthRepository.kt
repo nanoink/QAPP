@@ -79,6 +79,10 @@ class AuthRepository {
         return client.auth.currentSessionOrNull() != null
     }
 
+    fun currentDriverId(): String? {
+        return client.auth.currentUserOrNull()?.id
+    }
+
     suspend fun resetPassword(email: String): Result<Unit> {
         val masked = maskEmail(email)
         return try {

@@ -91,18 +91,20 @@ fun DriversNearbyScreen(
                 modifier = Modifier.fillMaxSize(),
                 cameraPositionState = cameraState
             ) {
-                val current = userLocation
-                if (current != null) {
-                    Marker(
-                        state = MarkerState(position = LatLng(current.lat, current.lng)),
-                        title = "Voce"
-                    )
-                }
-                drivers.forEach { driver ->
-                    Marker(
-                        state = MarkerState(position = LatLng(driver.lat, driver.lng)),
-                        title = driver.name
-                    )
+                if (drivers.isNotEmpty()) {
+                    val current = userLocation
+                    if (current != null) {
+                        Marker(
+                            state = MarkerState(position = LatLng(current.lat, current.lng)),
+                            title = "Voce"
+                        )
+                    }
+                    drivers.forEach { driver ->
+                        Marker(
+                            state = MarkerState(position = LatLng(driver.lat, driver.lng)),
+                            title = driver.name
+                        )
+                    }
                 }
             }
         }

@@ -48,6 +48,7 @@ import com.qapp.app.services.CoreSecurityService
 import com.qapp.app.services.PanicRealtimeService
 import io.github.jan.supabase.gotrue.auth
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -56,6 +57,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class AppViewModel(
     application: Application
@@ -332,7 +334,9 @@ class AppViewModel(
             return
         }
         viewModelScope.launch {
-            LocationRepository(getApplication<Application>()).clearBuffer()
+            withContext(Dispatchers.IO) {
+                LocationRepository(getApplication<Application>()).clearBuffer()
+            }
             val appContext = getApplication<Application>()
             val authed = authRepository.isAuthenticated()
             SecuritySessionStore.setState(
@@ -398,6 +402,9 @@ class AppViewModel(
             SecurityStateStore.init(appContext)
             repo.setOffline()
             SecurityStateStore.setState(SecurityState.OFFLINE)
+            withContext(Dispatchers.IO) {
+                LocationStateStore.clear()
+            }
             stopAlertListener()
             CoreSecurityService.goOffline(appContext)
             _isOnline.value = false

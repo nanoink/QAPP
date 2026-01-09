@@ -67,6 +67,7 @@ fun IncomingPanicAlertScreen(
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    LocationStateStore.init(context)
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     if (!uiState.isVisible) {
@@ -122,10 +123,9 @@ fun IncomingPanicAlertScreen(
     }
 
     LaunchedEffect(uiState.isVisible) {
-        while (uiState.isVisible) {
-            val current = LocationStateStore.get()
+        if (!uiState.isVisible) return@LaunchedEffect
+        LocationStateStore.state.collect { current ->
             receiverLatLng = current?.let { LatLng(it.lat, it.lng) }
-            delay(2000L)
         }
     }
 

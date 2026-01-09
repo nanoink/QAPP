@@ -21,6 +21,7 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.qapp.app.R
+import com.qapp.app.core.AppForegroundTracker
 import com.qapp.app.core.CoreConfig
 import com.qapp.app.core.DefensiveModeManager
 import com.qapp.app.core.LocationStateStore
@@ -39,6 +40,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
 import java.util.logging.Logger
 import java.text.SimpleDateFormat
@@ -65,6 +68,9 @@ class LocationService : Service() {
     private var lastSentLocation: Location? = null
     private var lastSentAtMs: Long = 0L
     private var foregroundStarted = false
+    private val locationMutex = Mutex()
+    private var currentConfig: LocationUpdateConfig? = null
+    private var defensiveBypassLogged = false
 
     override fun onCreate() {
         super.onCreate()
@@ -104,7 +110,9 @@ class LocationService : Service() {
             ACTION_SET_PANIC_OFF -> setPanicMode(false)
             ACTION_STOP -> {
                 stopLocationUpdates()
-                repository.clearBuffer()
+                CoroutineScope(Dispatchers.IO).launch {
+                    repository.clearBuffer()
+                }
                 serviceScope.coroutineContext.cancelChildren()
                 stopForeground(true)
                 foregroundStarted = false
@@ -178,66 +186,31 @@ class LocationService : Service() {
             return
         }
 
+        val config = resolveConfig()
+        if (isTracking && currentConfig == config) {
+            return
+        }
+
         if (isTracking) {
             stopLocationUpdates()
         }
-
-        val defensiveMode = DefensiveModeManager.isEnabled()
-        if (defensiveMode) {
-            Log.w(logTag, "Defensive mode active: reducing location update frequency")
-        }
-        val intervalMs = when {
-            defensiveMode -> DEFENSIVE_INTERVAL_MS
-            isPanicMode -> PANIC_INTERVAL_MS
-            else -> NORMAL_INTERVAL_MS
-        }
-        val fastestMs = when {
-            defensiveMode -> DEFENSIVE_FASTEST_INTERVAL_MS
-            isPanicMode -> PANIC_FASTEST_INTERVAL_MS
-            else -> FASTEST_INTERVAL_MS
-        }
-        val minDistance = when {
-            defensiveMode -> DEFENSIVE_MIN_DISTANCE_METERS
-            isPanicMode -> PANIC_MIN_DISTANCE_METERS
-            else -> MIN_DISTANCE_METERS
-        }
+        currentConfig = config
 
         val request = LocationRequest.Builder(
-            LocationRequest.PRIORITY_BALANCED_POWER_ACCURACY,
-            intervalMs
-        ).setMinUpdateIntervalMillis(fastestMs)
-            .setMinUpdateDistanceMeters(minDistance)
+            LocationRequest.PRIORITY_HIGH_ACCURACY,
+            config.intervalMs
+        ).setMinUpdateIntervalMillis(config.fastestMs)
+            .setMinUpdateDistanceMeters(config.minDistanceMeters)
+            .setWaitForAccurateLocation(false)
             .build()
 
         val callback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 val location = result.lastLocation ?: return
                 touchHeartbeat()
-                LocationStateStore.update(
-                    lat = location.latitude,
-                    lng = location.longitude,
-                    timestamp = System.currentTimeMillis()
-                )
-                GpsStatusMonitor.updateFix(location)
-                val nowMs = System.currentTimeMillis()
-                if (!shouldSendLocation(location, nowMs)) {
-                    Log.d(LogTags.LOCATION, "Location skipped (distance/time)")
-                    return
-                }
-                markLocationSent(location, nowMs)
                 serviceScope.launch {
-                    try {
-                        repository.sendLocation(
-                            location.latitude,
-                            location.longitude,
-                            location.accuracy
-                        )
-                        if (isPanicMode) {
-                            repository.flushNow()
-                            publishPanicLocation(location)
-                        }
-                    } catch (ex: Exception) {
-                        logger.warning("LocationService: failed to send location")
+                    locationMutex.withLock {
+                        handleLocationUpdate(location)
                     }
                 }
             }
@@ -269,12 +242,40 @@ class LocationService : Service() {
         isTracking = false
     }
 
+    private suspend fun handleLocationUpdate(location: Location) {
+        val nowMs = System.currentTimeMillis()
+        LocationStateStore.update(
+            lat = location.latitude,
+            lng = location.longitude,
+            timestamp = nowMs
+        )
+        GpsStatusMonitor.updateFix(location)
+        if (!shouldSendLocation(location, nowMs)) {
+            Log.d(LogTags.LOCATION, "Location skipped (distance/time)")
+            return
+        }
+        markLocationSent(location, nowMs)
+        try {
+            repository.sendLocation(
+                location.latitude,
+                location.longitude,
+                location.accuracy
+            )
+            if (isPanicMode) {
+                repository.flushNow()
+                publishPanicLocation(location)
+            }
+        } catch (ex: Exception) {
+            logger.warning("LocationService: failed to send location")
+        }
+    }
+
     private fun shouldSendLocation(location: Location, nowMs: Long): Boolean {
         val previous = lastSentLocation
         if (previous == null || lastSentAtMs == 0L) {
             return true
         }
-        val minTimeMs = if (DefensiveModeManager.isEnabled()) {
+        val minTimeMs = if (shouldApplyDefensiveMode()) {
             DEFENSIVE_MIN_TIME_BETWEEN_UPDATES_MS
         } else {
             MIN_TIME_BETWEEN_UPDATES_MS
@@ -289,7 +290,7 @@ class LocationService : Service() {
             location.latitude,
             location.longitude
         )
-        val minDistanceMeters = if (DefensiveModeManager.isEnabled()) {
+        val minDistanceMeters = if (shouldApplyDefensiveMode()) {
             DEFENSIVE_MIN_DISTANCE_METERS
         } else {
             MIN_DISTANCE_METERS
@@ -376,19 +377,64 @@ class LocationService : Service() {
         return fine || coarse
     }
 
+    private fun resolveConfig(): LocationUpdateConfig {
+        if (!DefensiveModeManager.isEnabled()) {
+            defensiveBypassLogged = false
+        }
+        val useDefensiveMode = shouldApplyDefensiveMode()
+        if (DefensiveModeManager.isEnabled() && !useDefensiveMode && !defensiveBypassLogged) {
+            defensiveBypassLogged = true
+            Log.i(LogTags.LOCATION, "Defensive mode enabled but GPS throttling bypassed (foreground)")
+        }
+        if (useDefensiveMode) {
+            Log.w(logTag, "Defensive mode active: reducing location update frequency")
+        }
+        return when {
+            useDefensiveMode -> LocationUpdateConfig(
+                intervalMs = DEFENSIVE_INTERVAL_MS,
+                fastestMs = DEFENSIVE_FASTEST_INTERVAL_MS,
+                minDistanceMeters = DEFENSIVE_MIN_DISTANCE_METERS
+            )
+            isPanicMode -> LocationUpdateConfig(
+                intervalMs = PANIC_INTERVAL_MS,
+                fastestMs = PANIC_FASTEST_INTERVAL_MS,
+                minDistanceMeters = PANIC_MIN_DISTANCE_METERS
+            )
+            else -> LocationUpdateConfig(
+                intervalMs = NORMAL_INTERVAL_MS,
+                fastestMs = FASTEST_INTERVAL_MS,
+                minDistanceMeters = MIN_DISTANCE_METERS
+            )
+        }
+    }
+
+    private fun shouldApplyDefensiveMode(): Boolean {
+        if (!DefensiveModeManager.isEnabled()) return false
+        if (SecurityStateStore.isOnline() && AppForegroundTracker.isInForeground(this)) {
+            return false
+        }
+        return true
+    }
+
+    private data class LocationUpdateConfig(
+        val intervalMs: Long,
+        val fastestMs: Long,
+        val minDistanceMeters: Float
+    )
+
     companion object {
         const val ACTION_START = "com.qapp.app.action.LOCATION_START"
         const val ACTION_STOP = "com.qapp.app.action.LOCATION_STOP"
         const val ACTION_SET_PANIC_ON = "com.qapp.app.action.LOCATION_PANIC_ON"
         const val ACTION_SET_PANIC_OFF = "com.qapp.app.action.LOCATION_PANIC_OFF"
         private const val NOTIFICATION_ID = 2001
-        private const val NORMAL_INTERVAL_MS = 10_000L
-        private const val FASTEST_INTERVAL_MS = 5_000L
-        private const val MIN_TIME_BETWEEN_UPDATES_MS = 10_000L
-        private const val MIN_DISTANCE_METERS = 25f
+        private const val NORMAL_INTERVAL_MS = 3_000L
+        private const val FASTEST_INTERVAL_MS = 2_000L
+        private const val MIN_TIME_BETWEEN_UPDATES_MS = 2_000L
+        private const val MIN_DISTANCE_METERS = 5f
         private const val PANIC_INTERVAL_MS = 3_000L
-        private const val PANIC_FASTEST_INTERVAL_MS = 1_500L
-        private const val PANIC_MIN_DISTANCE_METERS = 8f
+        private const val PANIC_FASTEST_INTERVAL_MS = 2_000L
+        private const val PANIC_MIN_DISTANCE_METERS = 5f
         private const val DEFENSIVE_INTERVAL_MS = 30_000L
         private const val DEFENSIVE_FASTEST_INTERVAL_MS = 15_000L
         private const val DEFENSIVE_MIN_TIME_BETWEEN_UPDATES_MS = 30_000L

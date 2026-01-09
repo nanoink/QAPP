@@ -7,4 +7,5 @@ object LogTags {
     const val LOCATION = "QAPP_LOCATION"
     const val WATCHDOG = "QAPP_WATCHDOG"
     const val VOICE = "PANIC_VOICE"
+    const val APP = "QAPP_APP"
 }

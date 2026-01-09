@@ -2,6 +2,7 @@ package com.qapp.app.ui.screens
 
 import android.util.Log
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.qapp.app.core.CurrentLocation
 import com.qapp.app.core.LocationStateStore
 import com.qapp.app.core.SupabaseClientProvider
@@ -10,6 +11,7 @@ import com.qapp.app.nearby.DriverLocation
 import com.qapp.app.nearby.NearbyDriversRegistry
 import com.qapp.app.nearby.distanceKm
 import io.github.jan.supabase.SupabaseClient
+import io.github.jan.supabase.gotrue.auth
 import io.github.jan.supabase.realtime.PostgresAction
 import io.github.jan.supabase.realtime.RealtimeChannel
 import io.github.jan.supabase.realtime.channel
@@ -37,19 +39,38 @@ class DriversNearbyViewModel(
     private val _userLocation = MutableStateFlow<CurrentLocation?>(null)
     val userLocation: StateFlow<CurrentLocation?> = _userLocation.asStateFlow()
 
+    @Volatile
+    private var allOnlineDrivers: List<DriverLocation> = emptyList()
+
     private var realtimeJob: Job? = null
     private var realtimeChannel: RealtimeChannel? = null
+    private var locationJob: Job? = null
 
     fun start() {
-        if (realtimeJob?.isActive == true) return
-        realtimeJob = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            startRealtime()
+        if (locationJob?.isActive != true) {
+            _userLocation.value = sanitizeLocation(
+                LocationStateStore.get(maxAgeMs = LOCATION_TTL_MS)
+            )
+            locationJob = viewModelScope.launch {
+                LocationStateStore.state.collect { location ->
+                    val sanitized = sanitizeLocation(location)
+                    _userLocation.value = sanitized
+                    filterDrivers(sanitized)
+                }
+            }
+        }
+        if (realtimeJob?.isActive != true) {
+            realtimeJob = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                startRealtime()
+            }
         }
     }
 
     fun stop() {
         realtimeJob?.cancel()
         realtimeJob = null
+        locationJob?.cancel()
+        locationJob = null
 
         val channel = realtimeChannel
         realtimeChannel = null
@@ -100,16 +121,26 @@ class DriversNearbyViewModel(
     }
 
     private suspend fun refreshDrivers() {
-        val current = LocationStateStore.get()
-        _userLocation.value = current
-        if (current == null) {
+        val freshDrivers = repository.fetchOnlineDrivers()
+        val selfId = client.auth.currentUserOrNull()?.id
+        allOnlineDrivers = if (selfId.isNullOrBlank()) {
+            freshDrivers
+        } else {
+            freshDrivers.filterNot { it.id == selfId }
+        }
+        filterDrivers(_userLocation.value)
+    }
+
+    private suspend fun filterDrivers(location: CurrentLocation?) {
+        if (location == null) {
             updateDrivers(emptyList())
             return
         }
-
-        val allOnlineDrivers = repository.fetchOnlineDrivers()
-        val nearbyDrivers = allOnlineDrivers.filter { driver ->
-            calculateDistanceKm(current.lat, current.lng, driver.lat, driver.lng) <= 10.0
+        val driversSnapshot = allOnlineDrivers
+        val nearbyDrivers = withContext(Dispatchers.Default) {
+            driversSnapshot.filter { driver ->
+                calculateDistanceKm(location.lat, location.lng, driver.lat, driver.lng) <= 10.0
+            }
         }
         updateDrivers(nearbyDrivers)
     }
@@ -131,11 +162,22 @@ class DriversNearbyViewModel(
         return distanceKm(lat1, lng1, lat2, lng2)
     }
 
+    private fun sanitizeLocation(location: CurrentLocation?): CurrentLocation? {
+        if (location == null) return null
+        val now = System.currentTimeMillis()
+        if (now - location.timestamp > LOCATION_TTL_MS) {
+            LocationStateStore.clear()
+            return null
+        }
+        return location
+    }
+
     override fun onCleared() {
         stop()
     }
 
     companion object {
         private const val TAG = "DRIVERS_NEARBY"
+        private const val LOCATION_TTL_MS = 60_000L
     }
 }

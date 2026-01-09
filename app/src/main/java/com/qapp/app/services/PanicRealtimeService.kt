@@ -45,15 +45,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 
 class PanicRealtimeService : Service() {
 
@@ -62,8 +59,13 @@ class PanicRealtimeService : Service() {
     private var alertsJob: Job? = null
     private var channel: io.github.jan.supabase.realtime.RealtimeChannel? = null
     private var broadcastChannel: io.github.jan.supabase.realtime.RealtimeChannel? = null
+    private var broadcastChannelGlobal: io.github.jan.supabase.realtime.RealtimeChannel? = null
     private var broadcastJob: Job? = null
     private var resolvedJob: Job? = null
+    private var locationJob: Job? = null
+    private var broadcastGlobalJob: Job? = null
+    private var resolvedGlobalJob: Job? = null
+    private var locationGlobalJob: Job? = null
     private var guard: PanicEventGuard? = null
     private val realtimeHealthy = AtomicBoolean(false)
     private var wakeLock: PowerManager.WakeLock? = null
@@ -97,9 +99,14 @@ class PanicRealtimeService : Service() {
         alertsJob?.cancel()
         broadcastJob?.cancel()
         resolvedJob?.cancel()
+        locationJob?.cancel()
+        broadcastGlobalJob?.cancel()
+        resolvedGlobalJob?.cancel()
+        locationGlobalJob?.cancel()
         runBlocking {
             channel?.unsubscribe()
             broadcastChannel?.unsubscribe()
+            broadcastChannelGlobal?.unsubscribe()
         }
         realtimeHealthy.set(false)
         guard?.stop()
@@ -130,6 +137,7 @@ class PanicRealtimeService : Service() {
                     table = "panic_events"
                 }
                 realtimeChannel.subscribe()
+                Log.i(logTag, "REALTIME_SUBSCRIBED channel=panic_events_global")
                 realtimeHealthy.set(true)
                 changes.collect { action ->
                     when (action) {
@@ -147,12 +155,41 @@ class PanicRealtimeService : Service() {
     }
 
     private fun startBroadcastListener() {
-        if (broadcastJob?.isActive == true) return
-        val channel = SupabaseClientProvider.client.realtime.channel("panic_events")
-        broadcastChannel = channel
-        broadcastJob = scope.launch {
+        if (broadcastJob?.isActive == true && broadcastGlobalJob?.isActive == true) return
+        if (broadcastJob?.isActive != true) {
+            broadcastJob = scope.launch {
+                try {
+                    val channel = SupabaseClientProvider.client.realtime.channel("panic_events")
+                    broadcastChannel = channel
+                    channel.subscribe()
+                    Log.i(logTag, "REALTIME_SUBSCRIBED channel=panic_events")
+                    launch {
+                        channel.broadcastFlow<PanicAlertPayload>(EVENT_PANIC).collect { payload ->
+                            handleBroadcast(payload)
+                        }
+                    }
+                    launch {
+                        channel.broadcastFlow<PanicLocationPayload>(EVENT_PANIC_LOCATION).collect { payload ->
+                            handleLocationBroadcast(payload)
+                        }
+                    }
+                    launch {
+                        channel.broadcastFlow<PanicResolvedPayload>(EVENT_PANIC_RESOLVED).collect { payload ->
+                            handleResolvedBroadcast(payload)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(logTag, "Broadcast listener error: ${e.message}", e)
+                }
+            }
+        }
+        if (broadcastGlobalJob?.isActive == true) return
+        broadcastGlobalJob = scope.launch {
             try {
+                val channel = SupabaseClientProvider.client.realtime.channel("panic_events_global")
+                broadcastChannelGlobal = channel
                 channel.subscribe()
+                Log.i(logTag, "REALTIME_SUBSCRIBED channel=panic_events_global")
                 launch {
                     channel.broadcastFlow<PanicAlertPayload>(EVENT_PANIC).collect { payload ->
                         handleBroadcast(payload)
@@ -169,7 +206,7 @@ class PanicRealtimeService : Service() {
                     }
                 }
             } catch (e: Exception) {
-                Log.w(logTag, "Broadcast listener error: ${e.message}", e)
+                Log.w(logTag, "Broadcast listener error (global): ${e.message}", e)
             }
         }
     }
@@ -178,6 +215,7 @@ class PanicRealtimeService : Service() {
         val isActive = record.boolean("is_active") ?: false
         if (!isActive) return
         val eventId = record.string("id") ?: return
+        Log.i(logTag, "PANIC_REALTIME EVENT RAW=$record")
         Log.i(logTag, "PANIC_EVENT_RECEIVED_REALTIME id=$eventId")
         val driverId = record.string("driver_id") ?: return
         if (!shouldProcessEvent(eventId)) {
@@ -198,16 +236,17 @@ class PanicRealtimeService : Service() {
             logDecision(eventId, driverId, null, true, "SKIPPED", "OFFLINE")
             return
         }
-        val location = record.latLngFromFields(eventId)
+        val location = record.latLngFromFields()
         if (location == null) {
-            logLocationMissing(eventId)
-            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_LOCATION")
+            Log.w(logTag, "PANIC_EVENT_SKIPPED_NO_COORDINATES event_id=$eventId")
+            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_COORDINATES")
             return
         }
+        Log.i(logTag, "PANIC_EVENT_VALID lat=${location.first} lng=${location.second}")
         logLocationUsed(location.first, location.second)
         val ownLocation = resolveReceiverLocation()
         if (ownLocation == null) {
-            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_LOCATION")
+            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_RECEIVER_LOCATION")
             return
         }
         val distanceKm = PanicMath.distanceKm(
@@ -241,6 +280,7 @@ class PanicRealtimeService : Service() {
             muted = false,
             vehicle = vehicle
         )
+        Log.i(logTag, "PANIC_UI_OPENED event_id=$eventId")
         PanicAlertPendingStore.save(eventId, driverId, now)
         acquireWakeLock()
         showAlertNotification(eventId, driverId)
@@ -277,7 +317,7 @@ class PanicRealtimeService : Service() {
         }
         val ownLocation = resolveReceiverLocation()
         if (ownLocation == null) {
-            logDecision(eventId, driverId, null, online, "SKIPPED", "NO_LOCATION")
+            logDecision(eventId, driverId, null, online, "SKIPPED", "NO_RECEIVER_LOCATION")
             return
         }
         logLocationUsed(payload.latitude, payload.longitude)
@@ -343,10 +383,10 @@ class PanicRealtimeService : Service() {
             return
         }
         val driverId = record.string("driver_id") ?: return
-        val location = record.latLngFromFields(eventId)
+        val location = record.latLngFromFields()
         if (location == null) {
-            logLocationMissing(eventId)
-            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_LOCATION")
+            Log.w(logTag, "PANIC_EVENT_SKIPPED_NO_COORDINATES event_id=$eventId")
+            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_COORDINATES")
             return
         }
         handleActiveLocationUpdate(eventId, driverId, location)
@@ -373,7 +413,7 @@ class PanicRealtimeService : Service() {
         }
         val ownLocation = resolveReceiverLocation()
         if (ownLocation == null) {
-            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_LOCATION")
+            logDecision(eventId, driverId, null, true, "SKIPPED", "NO_RECEIVER_LOCATION")
             return
         }
         logLocationUsed(location.first, location.second)
@@ -564,22 +604,16 @@ class PanicRealtimeService : Service() {
 
     private fun JsonObject.boolean(key: String): Boolean? = this[key]?.jsonPrimitive?.booleanOrNull
 
-    private fun JsonObject.latLngFromFields(eventId: String): Pair<Double, Double>? {
+    private fun JsonObject.latLngFromFields(): Pair<Double, Double>? {
         val lat = this["lat"]?.jsonPrimitive?.doubleOrNull
         val lng = this["lng"]?.jsonPrimitive?.doubleOrNull
         if (lat == null || lng == null) {
-            logLocationMissing(eventId)
             return null
         }
         if (!lat.isFinite() || !lng.isFinite()) {
-            logLocationMissing(eventId)
             return null
         }
         return lat to lng
-    }
-
-    private fun logLocationMissing(eventId: String) {
-        Log.w(logTag, "PANIC_LOCATION_MISSING event_id=$eventId")
     }
 
     private fun logLocationUsed(lat: Double, lng: Double) {
@@ -632,7 +666,6 @@ class PanicRealtimeService : Service() {
             put("is_active", kotlinx.serialization.json.JsonPrimitive(true))
             put("lat", kotlinx.serialization.json.JsonPrimitive(alert.lat))
             put("lng", kotlinx.serialization.json.JsonPrimitive(alert.lng))
-            put("location", kotlinx.serialization.json.JsonPrimitive(alert.locationWkt))
             if (!alert.driverName.isNullOrBlank()) {
                 put("driver_name", kotlinx.serialization.json.JsonPrimitive(alert.driverName))
             }

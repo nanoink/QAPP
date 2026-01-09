@@ -50,14 +50,14 @@ class PanicRepository : PanicDataSource {
             return Result.failure(IllegalStateException("Missing user id"))
         }
         Log.i(logTag, "PANIC_INSERT_ATTEMPT")
-        val startedAt = formatUtcTimestamp(System.currentTimeMillis())
-        val locationPoint = formatPoint(location.longitude, location.latitude)
+        val lat = location.latitude
+        val lng = location.longitude
         val groupId = getDriverGroupId(userId)
         val basePayload = PanicEventInsertBase(
             driverId = userId,
             isActive = true,
-            startedAt = startedAt,
-            location = locationPoint
+            lat = lat,
+            lng = lng
         )
         val result = if (!groupId.isNullOrBlank()) {
             insertPayload(
@@ -65,8 +65,8 @@ class PanicRepository : PanicDataSource {
                     driverId = userId,
                     groupId = groupId,
                     isActive = true,
-                    startedAt = startedAt,
-                    location = locationPoint
+                    lat = lat,
+                    lng = lng
                 )
             )
         } else {
@@ -110,7 +110,8 @@ class PanicRepository : PanicDataSource {
         lng: Double
     ): Result<Unit> {
         val update = PanicEventLocationUpdate(
-            location = formatGeographyPoint(lng, lat)
+            lat = lat,
+            lng = lng
         )
         return try {
             client.postgrest["panic_events"].update(update) {
@@ -142,14 +143,6 @@ class PanicRepository : PanicDataSource {
         val formatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
         formatter.timeZone = TimeZone.getTimeZone("UTC")
         return formatter.format(Date(epochMillis))
-    }
-
-    private fun formatPoint(lng: Double, lat: Double): String {
-        return "POINT($lng $lat)"
-    }
-
-    private fun formatGeographyPoint(lng: Double, lat: Double): String {
-        return "SRID=4326;POINT($lng $lat)"
     }
 
     private suspend fun insertPayload(payload: PanicEventInsertBase): Result<UUID> {
@@ -218,9 +211,10 @@ data class PanicEventInsertBase(
     val driverId: String,
     @SerialName("is_active")
     val isActive: Boolean,
-    @SerialName("started_at")
-    val startedAt: String,
-    val location: String
+    @SerialName("lat")
+    val lat: Double,
+    @SerialName("lng")
+    val lng: Double
 )
 
 @Serializable
@@ -231,9 +225,10 @@ data class PanicEventInsertWithGroup(
     val groupId: String,
     @SerialName("is_active")
     val isActive: Boolean,
-    @SerialName("started_at")
-    val startedAt: String,
-    val location: String
+    @SerialName("lat")
+    val lat: Double,
+    @SerialName("lng")
+    val lng: Double
 )
 
 @Serializable
@@ -246,7 +241,10 @@ data class PanicEventResolveUpdate(
 
 @Serializable
 data class PanicEventLocationUpdate(
-    val location: String
+    @SerialName("lat")
+    val lat: Double,
+    @SerialName("lng")
+    val lng: Double
 )
 
 @Serializable

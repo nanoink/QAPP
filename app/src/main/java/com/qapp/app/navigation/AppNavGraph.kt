@@ -10,6 +10,7 @@ import com.qapp.app.ui.AppViewModel
 import com.qapp.app.ui.home.HomeScreen
 import com.qapp.app.ui.screens.AccountScreen
 import com.qapp.app.ui.screens.ChangePasswordScreen
+import com.qapp.app.ui.screens.DriversNearbyScreen
 import com.qapp.app.ui.screens.ForgotPasswordScreen
 import com.qapp.app.ui.screens.IncomingPanicAlertScreen
 import com.qapp.app.ui.screens.LoginScreen
@@ -24,6 +25,7 @@ sealed class AppRoute(val route: String) {
     object Vehicles : AppRoute("vehicles")
     object VehicleForm : AppRoute("vehicle_form")
     object Account : AppRoute("account")
+    object DriversNearbyMap : AppRoute("drivers_nearby_map")
 
     object SecurityOnboarding : AppRoute("security_onboarding")
     object Login : AppRoute("login")
@@ -80,6 +82,7 @@ fun AppNavGraph(
                 viewModel = appViewModel,
                 onOpenVehicles = { navController.navigate(AppRoute.Vehicles.route) },
                 onOpenAccount = { navController.navigate(AppRoute.Account.route) },
+                onOpenDriversNearby = { navController.navigate(AppRoute.DriversNearbyMap.route) },
                 onOpenMap = { navController.navigate(AppRoute.MapFullScreen.route) },
                 onChangePassword = { navController.navigate(AppRoute.ChangePassword.route) },
                 onLogout = onLogout
@@ -98,6 +101,11 @@ fun AppNavGraph(
         }
         composable(AppRoute.Account.route) {
             AccountScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(AppRoute.DriversNearbyMap.route) {
+            DriversNearbyScreen(
                 onBack = { navController.popBackStack() }
             )
         }

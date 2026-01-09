@@ -101,6 +101,7 @@ private val MonoFont = FontFamily.Monospace
 fun HomeScreen(
     onOpenVehicles: () -> Unit,
     onOpenAccount: () -> Unit,
+    onOpenDriversNearby: () -> Unit,
     onOpenMap: () -> Unit,
     onChangePassword: () -> Unit,
     onLogout: () -> Unit,
@@ -185,6 +186,10 @@ fun HomeScreen(
                     onAccountClick = {
                         scope.launch { drawerState.close() }
                         onOpenAccount()
+                    },
+                    onDriversNearbyClick = {
+                        scope.launch { drawerState.close() }
+                        onOpenDriversNearby()
                     },
                     onLogoutClick = {
                         scope.launch { drawerState.close() }
@@ -411,6 +416,7 @@ private fun DrawerContent(
     name: String,
     onVehiclesClick: () -> Unit,
     onAccountClick: () -> Unit,
+    onDriversNearbyClick: () -> Unit,
     onLogoutClick: () -> Unit
 ) {
     Column(
@@ -446,6 +452,11 @@ private fun DrawerContent(
             icon = Icons.Default.Person,
             label = "Conta",
             onClick = onAccountClick
+        )
+        DrawerItem(
+            icon = Icons.Default.Menu,
+            label = "Motoristas proximos",
+            onClick = onDriversNearbyClick
         )
         Spacer(modifier = Modifier.weight(1f))
         Divider(color = Color(0xFFE0E0E0))

@@ -38,7 +38,6 @@ class PanicEventGuard(
         val driverName: String?,
         val lat: Double,
         val lng: Double,
-        val locationWkt: String,
         val createdAtMs: Long?,
         val vehicleBrand: String?,
         val vehicleMake: String?,
@@ -105,10 +104,10 @@ class PanicEventGuard(
         }
         val records = result.decodeList<PanicEventFallback>()
         if (records.isEmpty()) return
-        val sorted = records.sortedBy { parseTimestamp(it.startedAt ?: it.createdAt) ?: 0L }
+        val sorted = records.sortedBy { parseTimestamp(it.startedAt) ?: 0L }
         var maxSeen = lastSeenAtMs
         for (record in sorted) {
-            val createdAtMs = parseTimestamp(record.startedAt ?: record.createdAt)
+            val createdAtMs = parseTimestamp(record.startedAt)
             if (createdAtMs != null && createdAtMs > maxSeen) {
                 maxSeen = createdAtMs
             }
@@ -116,9 +115,10 @@ class PanicEventGuard(
                 Log.i(logTag, "PANIC_EVENT_DEDUPLICATED id=${record.id}")
                 continue
             }
-            val location = parseLocation(record.location)
-            if (location == null) {
-                Log.w(logTag, "Fallback event missing location id=${record.id}")
+            val lat = record.lat
+            val lng = record.lng
+            if (lat == null || lng == null) {
+                Log.w(logTag, "PANIC_EVENT_SKIPPED_NO_COORDINATES event_id=${record.id}")
                 markProcessed(record.id)
                 continue
             }
@@ -131,21 +131,19 @@ class PanicEventGuard(
             val distanceKm = PanicMath.distanceKm(
                 ownLocation.lat,
                 ownLocation.lng,
-                location.first,
-                location.second
+                lat,
+                lng
             )
             if (distanceKm > ALERT_RADIUS_KM) {
                 markProcessed(record.id)
                 continue
             }
-            val locationWkt = record.location ?: "POINT(${location.second} ${location.first})"
             val alert = FallbackAlert(
                 eventId = record.id,
                 driverId = record.driverId,
                 driverName = record.driverName,
-                lat = location.first,
-                lng = location.second,
-                locationWkt = locationWkt,
+                lat = lat,
+                lng = lng,
                 createdAtMs = createdAtMs,
                 vehicleBrand = record.vehicleBrand,
                 vehicleMake = record.vehicleMake,
@@ -187,16 +185,6 @@ class PanicEventGuard(
                 iterator.remove()
             }
         }
-    }
-
-    private fun parseLocation(value: String?): Pair<Double, Double>? {
-        if (value.isNullOrBlank()) return null
-        val trimmed = value.substringAfter("POINT").substringAfter("(").substringBefore(")")
-        val parts = trimmed.replace(",", " ").trim().split(Regex("\\s+"))
-        if (parts.size < 2) return null
-        val lng = parts[0].toDoubleOrNull() ?: return null
-        val lat = parts[1].toDoubleOrNull() ?: return null
-        return lat to lng
     }
 
     private fun parseTimestamp(value: String?): Long? {
@@ -246,11 +234,12 @@ private data class PanicEventFallback(
     val driverName: String? = null,
     @SerialName("is_active")
     val isActive: Boolean? = null,
-    @SerialName("created_at")
-    val createdAt: String? = null,
     @SerialName("started_at")
     val startedAt: String? = null,
-    val location: String? = null,
+    @SerialName("lat")
+    val lat: Double? = null,
+    @SerialName("lng")
+    val lng: Double? = null,
     @SerialName("vehicle_brand")
     val vehicleBrand: String? = null,
     @SerialName("vehicle_make")

@@ -99,6 +99,9 @@ fun QAppApp() {
 
     LaunchedEffect(alertState.isVisible) {
         val currentRoute = navController.currentBackStackEntry?.destination?.route
+        if (currentRoute == AppRoute.DriversNearbyMap.route) {
+            return@LaunchedEffect
+        }
         if (alertState.isVisible) {
             if (currentRoute != AppRoute.IncomingPanicAlert.route) {
                 navController.navigate(AppRoute.IncomingPanicAlert.route) {
@@ -112,6 +115,9 @@ fun QAppApp() {
 
     LaunchedEffect(pendingAlert?.eventId) {
         val currentRoute = navController.currentBackStackEntry?.destination?.route
+        if (currentRoute == AppRoute.DriversNearbyMap.route) {
+            return@LaunchedEffect
+        }
         if (pendingAlert != null && currentRoute != AppRoute.IncomingPanicAlert.route) {
             navController.navigate(AppRoute.IncomingPanicAlert.route) {
                 launchSingleTop = true

@@ -109,6 +109,8 @@ class DriverRepository(
             supabase.postgrest["drivers"].update(
                 DriverLocationUpdate(
                     location = formatPoint(lat, lng),
+                    lat = lat,
+                    lng = lng,
                     lastSeen = formatUtcTimestamp(System.currentTimeMillis())
                 )
             ) {
@@ -239,6 +241,8 @@ data class DriverInsert(
 @Serializable
 data class DriverLocationUpdate(
     val location: String,
+    val lat: Double,
+    val lng: Double,
     @SerialName("last_seen")
     val lastSeen: String
 )

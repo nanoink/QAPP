@@ -402,9 +402,6 @@ class AppViewModel(
             SecurityStateStore.init(appContext)
             repo.setOffline()
             SecurityStateStore.setState(SecurityState.OFFLINE)
-            withContext(Dispatchers.IO) {
-                LocationStateStore.clear()
-            }
             stopAlertListener()
             CoreSecurityService.goOffline(appContext)
             _isOnline.value = false
